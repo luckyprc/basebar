@@ -1,4 +1,3 @@
-# 保存为 .github/workflows/aggregate-nodes.yml
 name: Aggregate & Filter V2Ray Nodes
 
 on:
@@ -100,16 +99,11 @@ jobs:
           if failed_sources:
               print(f"Failed sources: {', '.join(failed_sources)}")
 
-          # 保存去重后的完整节点
+          # 保存去重后的完整节点（明文）
           os.makedirs('output', exist_ok=True)
           with open(f'output/{yesterday}-all.txt', 'w', encoding='utf-8') as f:
               f.write('\n'.join(unique_nodes))
           
-          # 同时保存为聚合订阅文件 (Base64)
-          encoded = base64.b64encode('\n'.join(unique_nodes).encode()).decode()
-          with open('output/v2ray.txt', 'w') as f:
-              f.write(encoded)
-              
           # 设置输出变量
           with open(os.environ.get('GITHUB_OUTPUT', '/dev/null'), 'a') as fh:
               print(f"node_count={len(unique_nodes)}", file=fh)
@@ -183,17 +177,12 @@ jobs:
           print(f"Alive nodes: {len(alive_nodes)}/{len(nodes)}")
           print(f"Top 10 latencies: {[lat for _, lat in alive_nodes[:10]]}")
 
-          # 保存筛选后的节点
+          # 保存筛选后的节点（明文）
           filtered = [n for n, _ in alive_nodes]
           with open(f'output/{yesterday}-filtered.txt', 'w') as f:
               f.write('\n'.join(filtered))
-          
-          # 更新主订阅文件（只保留筛选后的）
-          encoded = base64.b64encode('\n'.join(filtered).encode()).decode()
-          with open('output/v2ray.txt', 'w') as f:
-              f.write(encoded)
 
-          # 按协议分类保存
+          # 按协议分类保存（明文）
           protocols = {'vmess': [], 'vless': [], 'trojan': [], 'ss': [], 'other': []}
           for node in filtered:
               for p in protocols:
@@ -207,9 +196,15 @@ jobs:
               if items:
                   with open(f'output/{yesterday}-{proto}.txt', 'w') as f:
                       f.write('\n'.join(items))
-                  # Base64版本
-                  with open(f'output/{yesterday}-{proto}.b64.txt', 'w') as f:
-                      f.write(base64.b64encode('\n'.join(items).encode()).decode())
+
+          # ========== 生成固定文件名的订阅文件 ==========
+          # 主订阅文件：v2ray.txt（明文，固定文件名）
+          with open('output/v2ray.txt', 'w') as f:
+              f.write('\n'.join(filtered))
+          
+          # Base64编码版本：v2ray.b64.txt（固定文件名，兼容部分客户端）
+          with open('output/v2ray.b64.txt', 'w') as f:
+              f.write(base64.b64encode('\n'.join(filtered).encode()).decode())
 
           # 输出统计
           with open(os.environ.get('GITHUB_OUTPUT', '/dev/null'), 'a') as fh:
@@ -231,3 +226,4 @@ jobs:
           echo "- **Date**: ${{ steps.fetch.outputs.date }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Total Unique**: ${{ steps.fetch.outputs.node_count }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Alive (≤250ms)**: ${{ steps.test.outputs.alive_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Fixed URL**: https://raw.githubusercontent.com/${{ github.repository }}/main/output/v2ray.txt" >> $GITHUB_STEP_SUMMARY
