@@ -6,7 +6,7 @@
 - 去重（地址+端口+协议）
 - TCP 延迟检测（<250ms 保留）
 - HTTP 网页延迟检测（<250ms 保留）
-- IP 地域硬过滤（只保留亚洲、德国、法国）
+- IP 地域硬过滤（只保留亚洲【不含CN】、德国、法国）
 - 输出明文订阅（每行一个节点链接）
 """
 
@@ -42,8 +42,9 @@ TCP_TIMEOUT = 3
 MAX_WORKERS = 64
 
 # 允许的地域：亚洲国家代码 (ISO 3166-1 alpha-2) + 德国(DE) + 法国(FR)
+# 注意：已移除 CN（中国）
 ASIA_COUNTRY_CODES = {
-    "CN", "JP", "KR", "SG", "HK", "TW", "MY", "TH", "VN", "ID", "PH", "IN", "AE",
+    "JP", "KR", "SG", "HK", "TW", "MY", "TH", "VN", "ID", "PH", "IN", "AE",
     "TR", "KH", "LA", "MM", "BD", "LK", "NP", "PK", "MN", "MO", "BN", "TL",
     "KZ", "KG", "UZ", "TJ", "TM", "GE", "AM", "AZ", "CY", "IL", "JO", "KW",
     "LB", "OM", "QA", "SA", "YE", "BH", "IQ", "IR", "PS", "SY", "AF", "BT", "MV", "IO"
@@ -51,8 +52,9 @@ ASIA_COUNTRY_CODES = {
 ALLOWED_COUNTRY_CODES = ASIA_COUNTRY_CODES | {"DE", "FR"}
 
 # 亚洲国家英文名称（匹配 ip-api 返回的 country 字段）
+# 注意：已移除 China
 ASIA_COUNTRY_NAMES = {
-    "China", "Japan", "Korea", "South Korea", "Republic of Korea", "Singapore",
+    "Japan", "Korea", "South Korea", "Republic of Korea", "Singapore",
     "Hong Kong", "Taiwan", "Malaysia", "Thailand", "Vietnam", "Indonesia",
     "Philippines", "India", "United Arab Emirates", "Turkey", "Cambodia",
     "Laos", "Myanmar", "Burma", "Bangladesh", "Sri Lanka", "Nepal", "Pakistan",
@@ -224,7 +226,7 @@ def query_ip_region(ip: str) -> Optional[Dict]:
 
 
 def is_allowed_region(region_data: Optional[Dict]) -> bool:
-    """硬过滤：只保留亚洲、德国、法国节点"""
+    """硬过滤：只保留亚洲（不含CN）、德国、法国节点"""
     if not region_data:
         return False
     cc = region_data.get("countryCode", "")
@@ -407,7 +409,7 @@ def main():
         return
     print(f"[OK] HTTP latency: {http_latency}ms")
     
-    # 5. IP 地域查询 & 硬过滤（只保留亚洲 + 德国 + 法国）
+    # 5. IP 地域查询 & 硬过滤（只保留亚洲【不含CN】 + 德国 + 法国）
     print(f"[GEO] Querying IP regions and filtering allowed regions...")
     
     region_results: Dict[str, Optional[Dict]] = {}
@@ -438,7 +440,7 @@ def main():
         if is_allowed_region(region_data):
             allowed_nodes.append((node, tcp_lat))
     
-    print(f"[INFO] After region filter (Asia + DE/FR): {len(allowed_nodes)}")
+    print(f"[INFO] After region filter (Asia w/o CN + DE/FR): {len(allowed_nodes)}")
     if not allowed_nodes:
         print("[WARN] No nodes in allowed regions, aborting.")
         open(OUTPUT_FILE, "w").close()
@@ -454,11 +456,4 @@ def main():
         f.write(node_text)
     
     print(f"[OK] Output: {OUTPUT_FILE}")
-    print(f"[OK] Total qualified: {len(allowed_nodes)} (HTTP baseline: {http_latency}ms)")
-    for i, (node, lat) in enumerate(allowed_nodes[:5], 1):
-        host = extract_host_from_node(node)
-        print(f"  TOP{i}: {host} | TCP:{lat}ms")
-
-
-if __name__ == "__main__":
-    main()
+    print(f"[OK] Total qualified: {len(allowed_nodes)} (
