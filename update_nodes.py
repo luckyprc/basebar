@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-节点聚合器
+节点聚合器（加强地域过滤版）
 - 聚合多源站
 - 去重（地址+端口+协议）
 - TCP 延迟检测（<250ms 保留）
 - HTTP 网页延迟检测（<250ms 保留）
 - IP 地域硬过滤（只保留亚洲【不含CN】、德国、法国）
+  └─ 新增：IP 黑名单 + 域名后缀 fallback + 详细日志
 - 输出明文订阅（每行一个节点链接）
 """
 
@@ -26,34 +27,29 @@ import yaml
 
 # ==================== 配置区 ====================
 
-# 目标输出目录
 OUTPUT_DIR = "output"
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, "v2ray.txt")
 
-# 延迟阈值（毫秒）
 TCP_LATENCY_THRESHOLD = 250
 HTTP_LATENCY_THRESHOLD = 250
-# HTTP 连通性检测 URL
 HTTP_CHECK_URL = "http://connectivitycheck.platform.hicloud.com/generate_204"
-
-# TCP 连接超时（秒）
 TCP_TIMEOUT = 3
-# 延迟测试线程数
 MAX_WORKERS = 64
 
-# 允许的地域：亚洲国家代码 (ISO 3166-1 alpha-2) + 德国(DE) + 法国(FR)
-# 注意：已移除 CN（中国）
-ASIA_COUNTRY_CODES = {
+# IP 查询间隔（秒），避免 ip-api.com 限流
+IP_QUERY_DELAY = 1.5
+
+# 允许的国家代码（ISO 3166-1 alpha-2）—— 亚洲 + DE + FR，不含 CN
+ALLOWED_CC = {
     "JP", "KR", "SG", "HK", "TW", "MY", "TH", "VN", "ID", "PH", "IN", "AE",
     "TR", "KH", "LA", "MM", "BD", "LK", "NP", "PK", "MN", "MO", "BN", "TL",
     "KZ", "KG", "UZ", "TJ", "TM", "GE", "AM", "AZ", "CY", "IL", "JO", "KW",
-    "LB", "OM", "QA", "SA", "YE", "BH", "IQ", "IR", "PS", "SY", "AF", "BT", "MV", "IO"
+    "LB", "OM", "QA", "SA", "YE", "BH", "IQ", "IR", "PS", "SY", "AF", "BT", "MV", "IO",
+    "DE", "FR"
 }
-ALLOWED_COUNTRY_CODES = ASIA_COUNTRY_CODES | {"DE", "FR"}
 
-# 亚洲国家英文名称（匹配 ip-api 返回的 country 字段）
-# 注意：已移除 China
-ASIA_COUNTRY_NAMES = {
+# 允许的国家英文名称
+ALLOWED_CNAMES = {
     "Japan", "Korea", "South Korea", "Republic of Korea", "Singapore",
     "Hong Kong", "Taiwan", "Malaysia", "Thailand", "Vietnam", "Indonesia",
     "Philippines", "India", "United Arab Emirates", "Turkey", "Cambodia",
@@ -63,13 +59,35 @@ ASIA_COUNTRY_NAMES = {
     "Georgia", "Armenia", "Azerbaijan", "Cyprus", "Israel", "Jordan", "Kuwait",
     "Lebanon", "Oman", "Qatar", "Saudi Arabia", "Yemen", "Bahrain", "Iraq",
     "Iran", "Palestine", "Syria", "Afghanistan", "Bhutan", "Maldives",
-    "British Indian Ocean Territory",
+    "British Indian Ocean Territory", "Germany", "France"
 }
-ALLOWED_COUNTRY_NAMES = ASIA_COUNTRY_NAMES | {"Germany", "France"}
 
-# 源站列表（自动处理 GitHub 链接转 raw）
+# 明确禁止的域名后缀（欧美澳俄等）—— 硬过滤，不走 IP 查询
+BLOCKED_TLDS = {
+    '.uk', '.co.uk', '.gb', '.us', '.ca', '.au', '.nz', '.ru', '.ua', '.by',
+    '.nl', '.it', '.es', '.pl', '.se', '.no', '.fi', '.dk', '.ch', '.at', '.be',
+    '.ie', '.pt', '.cz', '.hu', '.ro', '.sk', '.bg', '.hr', '.si', '.lt', '.lv',
+    '.ee', '.lu', '.mt', '.is', '.li', '.mc', '.sm', '.va', '.ad', '.mx', '.br',
+    '.ar', '.cl', '.co', '.pe', '.ve', '.ec', '.uy', '.py', '.bo', '.sr', '.gy',
+    '.gf', '.fk', '.gs', '.io', '.tk', '.ml', '.ga', '.cf', '.gq', '.st', '.sc',
+    '.lc', '.vc', '.ag', '.dm', '.kn', '.bb', '.gd', '.tt', '.jm', '.ht', '.bs',
+    '.cu', '.do', '.pr', '.vi', '.gu', '.mp', '.as', '.fm', '.pw', '.mh', '.nr',
+    '.ki', '.tv', '.to', '.ws', '.sb', '.vu', '.fj', '.pg', '.ck', '.nu', '.wf',
+    '.pn', '.ai', '.vg', '.ky', '.bm', '.tc', '.ms', '.gp', '.mq', '.re', '.yt',
+    '.pm', '.tf', '.pf', '.nc', '.ac', '.sh', '.cx', '.cc', '.hm', '.nf'
+}
+
+# 明确允许的域名后缀（亚洲 + DE + FR）—— 硬放行，不走 IP 查询
+ALLOWED_TLDS = {
+    '.de', '.fr', '.jp', '.kr', '.sg', '.hk', '.tw', '.my', '.th', '.vn', '.id',
+    '.ph', '.in', '.ae', '.tr', '.kh', '.la', '.mm', '.bd', '.lk', '.np', '.pk',
+    '.mn', '.mo', '.bn', '.tl', '.kz', '.kg', '.uz', '.tj', '.tm', '.ge', '.am',
+    '.az', '.il', '.jo', '.kw', '.lb', '.om', '.qa', '.sa', '.ye', '.bh', '.iq',
+    '.ir', '.ps', '.sy', '.af', '.bt', '.mv'
+}
+
+# 源站列表
 SOURCES = [
-    # 用户指定源
     "http://comm.cczzuu.top/node/{date}-v2ray.txt",
     "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/Eternity",
     "https://raw.githubusercontent.com/mahdibland/ShadowsocksAggregator/master/EternityAir",
@@ -93,7 +111,6 @@ SOURCES = [
     "https://raw.githubusercontent.com/Jia-Pingwa/free-v2ray-merge/master/{date}.txt",
 ]
 
-# 日期占位符格式（YYYYMMDD）
 DATE_FMT = "%Y%m%d"
 
 
@@ -108,10 +125,7 @@ def ensure_dir(path: str) -> None:
 
 
 def fetch_url(url: str, retries: int = 2) -> Optional[str]:
-    """抓取 URL 内容，失败重试"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0",
-    }
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.0"}
     for attempt in range(retries + 1):
         try:
             resp = requests.get(url, headers=headers, timeout=15)
@@ -119,14 +133,13 @@ def fetch_url(url: str, retries: int = 2) -> Optional[str]:
                 return resp.text
         except Exception as e:
             if attempt == retries:
-                print(f"[ERR] Fetch failed after {retries+1} attempts: {url} -> {e}")
+                print(f"[ERR] Fetch failed: {url} -> {e}")
                 return None
             time.sleep(1)
     return None
 
 
 def decode_base64(data: str) -> str:
-    """兼容 Base64 解码（自动补 padding）"""
     try:
         data = data.strip()
         pad = 4 - len(data) % 4
@@ -138,7 +151,6 @@ def decode_base64(data: str) -> str:
 
 
 def extract_host_from_node(node_url: str) -> Optional[str]:
-    """从各种协议链接中提取服务器地址（域名或 IP）"""
     try:
         if node_url.startswith("vmess://"):
             b64 = node_url[8:]
@@ -160,7 +172,7 @@ def extract_host_from_node(node_url: str) -> Optional[str]:
             parts = decoded.split(":")
             if len(parts) >= 2:
                 return parts[0]
-        elif node_url.startswith("trojan://") or node_url.startswith("vless://"):
+        elif node_url.startswith(("trojan://", "vless://")):
             parsed = urllib.parse.urlparse(node_url)
             return parsed.hostname
         return None
@@ -169,7 +181,6 @@ def extract_host_from_node(node_url: str) -> Optional[str]:
 
 
 def extract_port_from_node(node_url: str) -> Optional[int]:
-    """提取端口"""
     try:
         if node_url.startswith("vmess://"):
             b64 = node_url[8:]
@@ -192,7 +203,6 @@ def extract_port_from_node(node_url: str) -> Optional[int]:
 
 
 def get_ip_from_host(host: str) -> Optional[str]:
-    """域名解析为 IP（简单 DNS 解析）"""
     if not host:
         return None
     if re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", host):
@@ -203,19 +213,36 @@ def get_ip_from_host(host: str) -> Optional[str]:
         return None
 
 
+def check_tld(host: str) -> Optional[bool]:
+    """
+    根据域名后缀快速判断地域
+    :return: True=允许, False=禁止, None=不确定（需 IP 查询）
+    """
+    if not host:
+        return None
+    h = host.lower()
+    for tld in BLOCKED_TLDS:
+        if h.endswith(tld):
+            return False
+    for tld in ALLOWED_TLDS:
+        if h.endswith(tld):
+            return True
+    return None
+
+
 def query_ip_region(ip: str) -> Optional[Dict]:
-    """查询 IP 地理位置（使用 ip-api.com）"""
+    """查询 IP 地理位置（ip-api.com），带限流保护"""
     if not ip:
         return None
-    # 内网 IP 跳过
+    # 跳过内网
     if ip.startswith(("10.", "172.16.", "172.17.", "172.18.", "172.19.",
                       "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
                       "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
                       "172.30.", "172.31.", "192.168.", "127.")):
         return None
     try:
-        url = f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,region,regionName,city,isp,query&lang=zh-CN"
-        resp = requests.get(url, timeout=5)
+        url = f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,query&lang=zh-CN"
+        resp = requests.get(url, timeout=6)
         if resp.status_code == 200:
             data = resp.json()
             if data.get("status") == "success":
@@ -226,20 +253,19 @@ def query_ip_region(ip: str) -> Optional[Dict]:
 
 
 def is_allowed_region(region_data: Optional[Dict]) -> bool:
-    """硬过滤：只保留亚洲（不含CN）、德国、法国节点"""
+    """根据 IP 查询结果判断"""
     if not region_data:
         return False
     cc = region_data.get("countryCode", "")
     cn = region_data.get("country", "")
-    if cc in ALLOWED_COUNTRY_CODES:
+    if cc in ALLOWED_CC:
         return True
-    if cn in ALLOWED_COUNTRY_NAMES:
+    if cn in ALLOWED_CNAMES:
         return True
     return False
 
 
 def tcp_latency_test(host: str, port: int) -> Optional[float]:
-    """TCP 连接延迟测试（毫秒），返回 None 表示超时/失败"""
     if not host or not port:
         return None
     try:
@@ -257,7 +283,6 @@ def tcp_latency_test(host: str, port: int) -> Optional[float]:
 
 
 def http_latency_test() -> Optional[float]:
-    """HTTP 网页延迟测试（runner 直连华为云连通性检测）"""
     try:
         start = time.time()
         resp = requests.get(HTTP_CHECK_URL, timeout=5)
@@ -270,20 +295,16 @@ def http_latency_test() -> Optional[float]:
 
 
 def parse_subscribe_content(text: str) -> List[str]:
-    """解析订阅内容，提取节点链接"""
     nodes = []
     if not text:
         return nodes
-    
     decoded = decode_base64(text)
     if decoded and ("://" in decoded):
         text = decoded
-    
     for line in text.splitlines():
         line = line.strip()
         if line.startswith(("vmess://", "ss://", "ssr://", "trojan://", "vless://")):
             nodes.append(line)
-    
     if not nodes and ("proxies:" in text or "Proxy:" in text):
         try:
             data = yaml.safe_load(text)
@@ -310,18 +331,12 @@ def parse_subscribe_content(text: str) -> List[str]:
                     nodes.append(f"trojan://{p.get('password')}@{p.get('server')}:{p.get('port')}?sni={p.get('sni', '')}")
         except Exception as e:
             print(f"[WARN] YAML parse error: {e}")
-    
     return nodes
 
 
 def get_source_urls() -> List[str]:
-    """生成当天源站 URL"""
     today = get_today_str()
-    urls = []
-    for src in SOURCES:
-        url = src.replace("{date}", today)
-        urls.append(url)
-    return urls
+    return [src.replace("{date}", today) for src in SOURCES]
 
 
 # ==================== 主流程 ====================
@@ -329,14 +344,11 @@ def get_source_urls() -> List[str]:
 def main():
     ensure_dir(OUTPUT_DIR)
     today = get_today_str()
-    
     print(f"=== Node Aggregator Started | Date: {today} ===")
-    
-    # 1. 抓取所有源站
+
+    # 1. 抓取
     all_nodes: List[str] = []
-    source_urls = get_source_urls()
-    
-    for url in source_urls:
+    for url in get_source_urls():
         print(f"[FETCH] {url}")
         content = fetch_url(url)
         if content:
@@ -345,115 +357,136 @@ def main():
             all_nodes.extend(nodes)
         else:
             print(f"  -> Failed or empty")
-    
+
     print(f"[INFO] Total raw nodes: {len(all_nodes)}")
     if not all_nodes:
         print("[WARN] No nodes fetched, aborting.")
         open(OUTPUT_FILE, "w").close()
         return
-    
-    # 2. 去重（基于 协议+地址+端口 的指纹）
+
+    # 2. 去重
     seen: Set[str] = set()
     unique_nodes: List[str] = []
-    
     for node in all_nodes:
         host = extract_host_from_node(node)
         port = extract_port_from_node(node)
         proto = node.split("://")[0] if "://" in node else "unknown"
-        fingerprint = f"{proto}://{host}:{port}"
-        
-        if fingerprint not in seen and host and port:
-            seen.add(fingerprint)
+        fp = f"{proto}://{host}:{port}"
+        if fp not in seen and host and port:
+            seen.add(fp)
             unique_nodes.append(node)
-    
     print(f"[INFO] After dedup: {len(unique_nodes)}")
-    
-    # 3. TCP 延迟测试（并发）
-    tcp_passed: List[Tuple[str, float]] = []  # (node, tcp_latency)
-    node_meta: List[Tuple[str, str, Optional[str], int]] = []
-    
+
+    # 3. TCP 延迟测试
+    tcp_passed: List[Tuple[str, float]] = []
+    node_meta = []
     for node in unique_nodes:
         host = extract_host_from_node(node)
         port = extract_port_from_node(node)
         ip = get_ip_from_host(host) if host else None
         if host and port:
             node_meta.append((node, host, ip, port))
-    
+
     print(f"[TEST] TCP latency testing {len(node_meta)} nodes (threshold {TCP_LATENCY_THRESHOLD}ms)...")
-    
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        future_to_node = {}
+        future_map = {}
         for node, host, ip, port in node_meta:
-            target_ip = ip or host
-            future = executor.submit(tcp_latency_test, target_ip, port)
-            future_to_node[future] = (node, host, ip, port)
-        
-        for future in as_completed(future_to_node):
-            node, host, ip, port = future_to_node[future]
-            latency = future.result()
-            if latency is not None:
-                tcp_passed.append((node, latency))
-    
+            target = ip or host
+            future = executor.submit(tcp_latency_test, target, port)
+            future_map[future] = (node, host, ip, port)
+        for future in as_completed(future_map):
+            node, host, ip, port = future_map[future]
+            lat = future.result()
+            if lat is not None:
+                tcp_passed.append((node, lat))
+
     print(f"[INFO] After TCP latency filter: {len(tcp_passed)}")
     if not tcp_passed:
-        print("[WARN] No nodes passed TCP latency test, aborting.")
+        print("[WARN] No nodes passed TCP latency test.")
         open(OUTPUT_FILE, "w").close()
         return
-    
-    # 4. HTTP 网页延迟测试（runner 网络环境质量门槛）
-    print(f"[TEST] HTTP latency check ({HTTP_CHECK_URL}, threshold {HTTP_LATENCY_THRESHOLD}ms)...")
-    http_latency = http_latency_test()
-    if http_latency is None:
-        print("[WARN] HTTP latency check failed or exceeds threshold. Aborting.")
+
+    # 4. HTTP 延迟门槛
+    print(f"[TEST] HTTP check ({HTTP_CHECK_URL}, threshold {HTTP_LATENCY_THRESHOLD}ms)...")
+    http_lat = http_latency_test()
+    if http_lat is None:
+        print("[WARN] HTTP check failed. Aborting.")
         open(OUTPUT_FILE, "w").close()
         return
-    print(f"[OK] HTTP latency: {http_latency}ms")
+    print(f"[OK] HTTP baseline: {http_lat}ms")
+
+    # 5. 地域过滤（TLD 硬规则 + IP 查询兜底）
+    print(f"[GEO] Filtering regions (Asia w/o CN + DE/FR only)...")
     
-    # 5. IP 地域查询 & 硬过滤（只保留亚洲【不含CN】 + 德国 + 法国）
-    print(f"[GEO] Querying IP regions and filtering allowed regions...")
-    
-    region_results: Dict[str, Optional[Dict]] = {}
-    ips_to_query: Set[str] = set()
-    
-    for node, _ in tcp_passed:
-        host = extract_host_from_node(node)
-        ip = get_ip_from_host(host)
-        if ip and ip not in region_results:
-            ips_to_query.add(ip)
-    
-    with ThreadPoolExecutor(max_workers=16) as executor:
-        future_to_ip = {}
-        for ip in ips_to_query:
-            future = executor.submit(query_ip_region, ip)
-            future_to_ip[future] = ip
-        
-        for future in as_completed(future_to_ip):
-            ip = future_to_ip[future]
-            region_results[ip] = future.result()
-            time.sleep(0.05)
-    
+    # 先分类：TLD 能确定的直接处理，不确定的收集 IP 串行查询
     allowed_nodes: List[Tuple[str, float]] = []
+    pending_nodes: List[Tuple[str, float, str, Optional[str]]] = []  # node, tcp_lat, host, ip
+    
     for node, tcp_lat in tcp_passed:
         host = extract_host_from_node(node)
-        ip = get_ip_from_host(host)
-        region_data = region_results.get(ip) if ip else None
-        if is_allowed_region(region_data):
+        # 先尝试 TLD 判断
+        tld_result = check_tld(host)
+        if tld_result is True:
+            print(f"  [PASS-TLD] {host} -> allowed TLD")
             allowed_nodes.append((node, tcp_lat))
+            continue
+        elif tld_result is False:
+            print(f"  [BLOCK-TLD] {host} -> blocked TLD")
+            continue
+        
+        # TLD 不确定，需要 IP 查询
+        ip = get_ip_from_host(host) if host else None
+        pending_nodes.append((node, tcp_lat, host or "?", ip))
     
-    print(f"[INFO] After region filter (Asia w/o CN + DE/FR): {len(allowed_nodes)}")
+    # 对不确定的节点串行查询 IP（避免限流）
+    if pending_nodes:
+        print(f"[GEO-IP] Need to query {len(pending_nodes)} IPs (generic TLDs or raw IPs)...")
+        region_cache: Dict[str, Optional[Dict]] = {}
+        
+        for node, tcp_lat, host, ip in pending_nodes:
+            if not ip:
+                print(f"  [BLOCK-DNS] {host} -> DNS resolve failed")
+                continue
+            
+            # 查缓存
+            if ip in region_cache:
+                data = region_cache[ip]
+            else:
+                data = query_ip_region(ip)
+                region_cache[ip] = data
+                time.sleep(IP_QUERY_DELAY)  # 限流保护
+            
+            if data:
+                cc = data.get("countryCode", "?")
+                cn = data.get("country", "?")
+                if is_allowed_region(data):
+                    print(f"  [PASS-IP] {host} ({ip}) -> {cn} ({cc})")
+                    allowed_nodes.append((node, tcp_lat))
+                else:
+                    print(f"  [BLOCK-IP] {host} ({ip}) -> {cn} ({cc})")
+            else:
+                print(f"  [BLOCK-UNK] {host} ({ip}) -> IP query failed or unknown region")
+    
+    print(f"[INFO] After region filter: {len(allowed_nodes)}")
     if not allowed_nodes:
-        print("[WARN] No nodes in allowed regions, aborting.")
+        print("[WARN] No nodes in allowed regions.")
         open(OUTPUT_FILE, "w").close()
         return
-    
-    # 6. 排序：按 TCP 延迟升序
+
+    # 6. 排序
     allowed_nodes.sort(key=lambda x: x[1])
-    
-    # 7. 生成订阅文件（明文，每行一个节点）
+
+    # 7. 输出明文
     node_text = "\n".join([n for n, _ in allowed_nodes])
-    
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(node_text)
-    
+
     print(f"[OK] Output: {OUTPUT_FILE}")
-    print(f"[OK] Total qualified: {len(allowed_nodes)} (
+    print(f"[OK] Total qualified: {len(allowed_nodes)} (HTTP: {http_lat}ms)")
+    for i, (node, lat) in enumerate(allowed_nodes[:5], 1):
+        h = extract_host_from_node(node)
+        print(f"  TOP{i}: {h} | TCP:{lat}ms")
+
+
+if __name__ == "__main__":
+    main()
