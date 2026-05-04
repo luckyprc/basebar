@@ -2,7 +2,6 @@ name: Aggregate & Filter V2Ray Nodes
 
 on:
   schedule:
-    # 北京时间 9:00 = UTC 01:00
     - cron: '0 1 * * *'
   workflow_dispatch:
 
@@ -21,6 +20,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install dependencies
+        run: pip install requests
+
       - name: Fetch & aggregate nodes
         id: fetch
         run: |
@@ -29,11 +31,9 @@ jobs:
           from urllib.parse import urlparse
           from datetime import datetime, timedelta
 
-          # 获取昨天北京时间日期
           yesterday = (datetime.utcnow() + timedelta(hours=8) - timedelta(days=1)).strftime('%Y%m%d')
           print(f"Target date: {yesterday}")
 
-          # ========== 多源配置（可自行增删） ==========
           sources = {
               'v2rayse_0800': f"https://v2rayse.com/fs/public/{yesterday}/free-node-share-0800.txt",
               'v2rayse_2000': f"https://v2rayse.com/fs/public/{yesterday}/free-node-share-2000.txt",
@@ -50,13 +50,11 @@ jobs:
                   resp = requests.get(url, timeout=30, headers={'User-Agent': 'Mozilla/5.0'})
                   if resp.status_code == 200 and len(resp.text) > 50:
                       content = resp.text.strip()
-                      # 尝试 Base64 解码
                       try:
                           decoded = base64.b64decode(content).decode('utf-8', errors='ignore')
                           nodes = [n.strip() for n in decoded.split('\n') 
                                    if n.strip().startswith(('vmess://', 'vless://', 'trojan://', 'ss://', 'ssr://', 'hysteria://', 'hysteria2://'))]
                       except Exception:
-                          # 明文格式
                           nodes = [n.strip() for n in content.split('\n') 
                                    if n.strip().startswith(('vmess://', 'vless://', 'trojan://', 'ss://', 'ssr://', 'hysteria://', 'hysteria2://'))]
                       
@@ -67,7 +65,6 @@ jobs:
               except Exception as e:
                   failed_sources.append(f"{name}: {str(e)}")
 
-          # ========== 去重：基于服务器地址+端口+协议 ==========
           def node_key(node):
               try:
                   if node.startswith('vmess://'):
@@ -99,18 +96,16 @@ jobs:
           if failed_sources:
               print(f"Failed sources: {', '.join(failed_sources)}")
 
-          # 保存去重后的完整节点（明文）
           os.makedirs('output', exist_ok=True)
           with open(f'output/{yesterday}-all.txt', 'w', encoding='utf-8') as f:
               f.write('\n'.join(unique_nodes))
           
-          # 设置输出变量
           with open(os.environ.get('GITHUB_OUTPUT', '/dev/null'), 'a') as fh:
               print(f"node_count={len(unique_nodes)}", file=fh)
               print(f"date={yesterday}", file=fh)
           PYEOF
 
-      - name: Test node connectivity (延迟筛选)
+      - name: Test node connectivity
         id: test
         run: |
           python3 << 'PYEOF'
@@ -118,15 +113,13 @@ jobs:
           from urllib.parse import urlparse
 
           yesterday = "${{ steps.fetch.outputs.date }}"
-          max_latency = 250  # ms
+          max_latency = 250
           max_workers = 50
 
-          # 读取节点
           with open(f'output/{yesterday}-all.txt', 'r') as f:
               nodes = [n.strip() for n in f.readlines() if n.strip()]
 
           def test_node(node):
-              """TCP端口连通性测试"""
               try:
                   if node.startswith('vmess://'):
                       data = json.loads(base64.b64decode(node[8:].split('#')[0] + '=='))
@@ -162,7 +155,6 @@ jobs:
               except:
                   return None
 
-          # 并发测试
           alive_nodes = []
           with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
               futures = {executor.submit(test_node, n): n for n in nodes}
@@ -171,18 +163,13 @@ jobs:
                   if result:
                       alive_nodes.append(result)
 
-          # 按延迟排序
           alive_nodes.sort(key=lambda x: x[1])
-          
           print(f"Alive nodes: {len(alive_nodes)}/{len(nodes)}")
-          print(f"Top 10 latencies: {[lat for _, lat in alive_nodes[:10]]}")
 
-          # 保存筛选后的节点（明文）
           filtered = [n for n, _ in alive_nodes]
           with open(f'output/{yesterday}-filtered.txt', 'w') as f:
               f.write('\n'.join(filtered))
 
-          # 按协议分类保存（明文）
           protocols = {'vmess': [], 'vless': [], 'trojan': [], 'ss': [], 'other': []}
           for node in filtered:
               for p in protocols:
@@ -197,16 +184,10 @@ jobs:
                   with open(f'output/{yesterday}-{proto}.txt', 'w') as f:
                       f.write('\n'.join(items))
 
-          # ========== 生成固定文件名的订阅文件 ==========
-          # 主订阅文件：v2ray.txt（明文，固定文件名）
+          # 固定文件名订阅文件（明文）
           with open('output/v2ray.txt', 'w') as f:
               f.write('\n'.join(filtered))
-          
-          # Base64编码版本：v2ray.b64.txt（固定文件名，兼容部分客户端）
-          with open('output/v2ray.b64.txt', 'w') as f:
-              f.write(base64.b64encode('\n'.join(filtered).encode()).decode())
 
-          # 输出统计
           with open(os.environ.get('GITHUB_OUTPUT', '/dev/null'), 'a') as fh:
               print(f"alive_count={len(alive_nodes)}", file=fh)
           PYEOF
@@ -217,12 +198,12 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add output/
           DATE="${{ steps.fetch.outputs.date }}"
-          git diff --cached --quiet || git commit -m "🔄 Update nodes for ${DATE} | Raw: ${{ steps.fetch.outputs.node_count }} | Alive: ${{ steps.test.outputs.alive_count }}"
+          git diff --cached --quiet || git commit -m "Update nodes for ${DATE} | Raw: ${{ steps.fetch.outputs.node_count }} | Alive: ${{ steps.test.outputs.alive_count }}"
           git push
 
       - name: Summary
         run: |
-          echo "## 📊 Node Update Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## Node Update Summary" >> $GITHUB_STEP_SUMMARY
           echo "- **Date**: ${{ steps.fetch.outputs.date }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Total Unique**: ${{ steps.fetch.outputs.node_count }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Alive (≤250ms)**: ${{ steps.test.outputs.alive_count }}" >> $GITHUB_STEP_SUMMARY
