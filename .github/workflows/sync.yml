@@ -1,0 +1,32 @@
+name: Sync Daily Sub
+
+on:
+  schedule:
+    - cron: '0 1 * * *'   # 每天 UTC 09:00 执行（北京时间早9点）
+  workflow_dispatch:      # 也支持手动点击运行
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Get current date
+        id: date
+        run: |
+          echo "DATE=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
+          echo "YEAR=$(date +%Y)" >> $GITHUB_OUTPUT
+          echo "MONTH=$(date +%m)" >> $GITHUB_OUTPUT
+          
+      - name: Download today's subscription
+        run: |
+          curl -L --fail -o latest.json \
+          "https://hiddify-next-node.github.io/uploads/${{ steps.date.outputs.YEAR }}/${{ steps.date.outputs.MONTH }}/${{ steps.date.outputs.DATE }}.json"
+          
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add latest.json
+          git commit -m "Update sub for ${{ steps.date.outputs.DATE }}" || exit 0
+          git push
