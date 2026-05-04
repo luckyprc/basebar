@@ -35,4 +35,4 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "chore: update nodes [$(date +%Y%m%d)]"
-          file_pattern: 'output/*.txt'
+          file_pattern: '*.txt'
