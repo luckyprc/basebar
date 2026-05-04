@@ -2,28 +2,47 @@ name: Sync Daily Sub
 
 on:
   schedule:
-    - cron: '0 1 * * *'   # 每天 UTC 09:00 执行（北京时间早9点）
-  workflow_dispatch:      # 也支持手动点击运行
+    - cron: '0 1 * * *'   # UTC 01:00 = 北京时间 09:00
+  workflow_dispatch:      # 支持手动触发
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Get current date
+
+      - name: Get Beijing date
         id: date
         run: |
-          echo "DATE=$(date +%Y%m%d)" >> $GITHUB_OUTPUT
-          echo "YEAR=$(date +%Y)" >> $GITHUB_OUTPUT
-          echo "MONTH=$(date +%m)" >> $GITHUB_OUTPUT
-          
+          DATE=$(TZ=Asia/Shanghai date +%Y%m%d)
+          YEAR=$(TZ=Asia/Shanghai date +%Y)
+          MONTH=$(TZ=Asia/Shanghai date +%m)
+          echo "DATE=$DATE" >> $GITHUB_OUTPUT
+          echo "YEAR=$YEAR" >> $GITHUB_OUTPUT
+          echo "MONTH=$MONTH" >> $GITHUB_OUTPUT
+          echo "Target file: ${YEAR}/${MONTH}/${DATE}.json"
+
       - name: Download today's subscription
+        id: download
         run: |
-          curl -L --fail -o latest.json \
-          "https://hiddify-next-node.github.io/uploads/${{ steps.date.outputs.YEAR }}/${{ steps.date.outputs.MONTH }}/${{ steps.date.outputs.DATE }}.json"
-          
-      - name: Commit and push
+          URL="https://hiddify-next-node.github.io/uploads/${{ steps.date.outputs.YEAR }}/${{ steps.date.outputs.MONTH }}/${{ steps.date.outputs.DATE }}.json"
+          echo "Fetching: $URL"
+
+          # 下载到临时文件，并捕获 HTTP 状态码
+          HTTP_CODE=$(curl -s -o temp_sub.json -w "%{http_code}" -L --max-time 30 "$URL")
+          echo "HTTP Status: $HTTP_CODE"
+          echo "http_code=$HTTP_CODE" >> $GITHUB_OUTPUT
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            mv temp_sub.json latest.json
+            echo "✅ Download success, will update latest.json"
+          else
+            rm -f temp_sub.json
+            echo "❌ Download failed (HTTP $HTTP_CODE), keeping old latest.json unchanged"
+          fi
+
+      - name: Commit and push (only if new file downloaded)
+        if: steps.download.outputs.http_code == '200'
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
