@@ -9,19 +9,15 @@ on:
 permissions:
   contents: write
 
-# 消除 Node.js 20 deprecated 警告，强制使用 Node 24 运行环境
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -32,7 +28,7 @@ jobs:
         run: python update_nodes.py
 
       - name: Commit and push
-        uses: stefanzweifel/git-auto-commit-action@v5
+        uses: stefanzweifel/git-auto-commit-action@v7
         with:
           commit_message: "chore: update nodes [$(date +%Y%m%d)]"
           file_pattern: 'output/*.txt'
