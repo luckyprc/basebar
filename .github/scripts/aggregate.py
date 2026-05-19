@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-优化版节点聚合脚本
+优化版节点聚合脚本（修复 urllib API 兼容性）
 改进点：
-1. 异步并发测试（大幅提升速度）
-2. TCP+TLS 双层测试
-3. 智能分级输出（按延迟分档）
-4. 放宽地理限制，补充低延迟节点
-5. 限制输出数量，适配 Hiddify
+1. 修复 urllib.request.Request timeout 参数问题
+2. 异步并发测试
+3. TCP+TLS 双层测试
+4. 智能分级输出
+5. 放宽地理限制
 """
 
 import os
@@ -26,8 +26,6 @@ import maxminddb
 LATENCY_TIMEOUT = int(os.getenv("LATENCY_TIMEOUT", "2"))
 MAX_LATENCY_MS = int(os.getenv("MAX_LATENCY_MS", "2000"))
 GEO_COUNTRIES = os.getenv("GEO_COUNTRIES", "HK,TW,JP,SG,MY,KR").split(",")
-REAL_TEST_URL = os.getenv("REAL_TEST_URL", "https://www.google.com/generate_204")
-REAL_TEST_TIMEOUT = int(os.getenv("REAL_TEST_TIMEOUT", "5"))
 
 # 订阅源
 SOURCES = [
@@ -44,7 +42,6 @@ SOURCES = [
 # ============ 节点解析 ============
 
 def decode_base64(data: str) -> str:
-    """增强版 Base64 解码"""
     data = data.strip()
     if not data:
         return ""
@@ -57,13 +54,11 @@ def decode_base64(data: str) -> str:
         return ""
 
 def extract_nodes(text: str) -> list:
-    """从文本中提取所有节点链接"""
     text = decode_base64(text) if not text.startswith(('vmess://', 'vless://', 'trojan://', 'ss://')) else text
     pattern = r'(vmess://|vless://|trojan://|ss://|ssr://)[^\s]+'
     return re.findall(pattern, text)
 
 def parse_node_url(url: str) -> dict:
-    """解析节点 URL，提取 IP/端口/协议"""
     try:
         if url.startswith('vmess://'):
             json_str = decode_base64(url[8:])
@@ -114,7 +109,6 @@ def parse_node_url(url: str) -> dict:
 # ============ 网络测试 ============
 
 def tcp_test(ip: str, port: int) -> int:
-    """TCP 连接测试，返回延迟(ms)，失败返回 99999"""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(LATENCY_TIMEOUT)
@@ -127,7 +121,6 @@ def tcp_test(ip: str, port: int) -> int:
         return 99999
 
 def tls_test(ip: str, port: int) -> int:
-    """TLS 握手测试，返回延迟(ms)，失败返回 99999"""
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
@@ -142,23 +135,20 @@ def tls_test(ip: str, port: int) -> int:
         return 99999
 
 def real_connect_test(node: dict) -> dict:
-    """真连接测试：TCP + TLS"""
     ip, port = node["ip"], node["port"]
 
-    # TCP 测试
     tcp_lat = tcp_test(ip, port)
     if tcp_lat == 99999 or tcp_lat > MAX_LATENCY_MS:
         return None
 
     node["tcp_latency"] = tcp_lat
 
-    # TLS 测试（针对 TLS 端口）
     tls_ports = [443, 8443, 2053, 2083, 2087, 2096]
     if port in tls_ports:
         tls_lat = tls_test(ip, port)
         node["tls_latency"] = tls_lat
         if tls_lat == 99999:
-            node["score"] = tcp_lat + 1000  # TLS 失败扣分
+            node["score"] = tcp_lat + 1000
         else:
             node["score"] = tcp_lat + tls_lat
     else:
@@ -168,7 +158,6 @@ def real_connect_test(node: dict) -> dict:
     return node
 
 def get_country(ip: str, geo_reader) -> str:
-    """查询 IP 归属国家"""
     try:
         rec = geo_reader.get(ip)
         return rec.get("country", {}).get("iso_code", "") or rec.get("registered_country", {}).get("iso_code", "")
@@ -178,7 +167,7 @@ def get_country(ip: str, geo_reader) -> str:
 # ============ 主流程 ============
 
 def fetch_source(source: dict) -> list:
-    """抓取单个源"""
+    """修复版：timeout 传给 urlopen() 而非 Request()"""
     url = source["url"].format(date=datetime.now().strftime("%Y%m%d"))
     try:
         req = urllib.request.Request(
@@ -186,10 +175,10 @@ def fetch_source(source: dict) -> list:
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "text/plain,*/*"
-            },
-            timeout=15
+            }
         )
-        with urllib.request.urlopen(req) as resp:
+        # 关键修复：timeout 传给 urlopen，不是 Request
+        with urllib.request.urlopen(req, timeout=15) as resp:
             data = resp.read().decode('utf-8', errors='ignore')
             nodes = extract_nodes(data)
             print(f"[FETCH] {url} -> {len(nodes)} nodes")
@@ -201,7 +190,7 @@ def fetch_source(source: dict) -> list:
             print(f"[FETCH ERR] {url}: HTTP {e.code}")
         return []
     except Exception as e:
-        print(f"[FETCH ERR] {url}: {str(e)[:50]}")
+        print(f"[FETCH ERR] {url}: {str(e)[:80]}")
         return []
 
 def main():
@@ -209,10 +198,8 @@ def main():
     print(f"Starting aggregation at {datetime.now()}")
     print("=" * 50)
 
-    # 1. 加载 GeoIP
     geo_reader = maxminddb.open_database("GeoLite2-Country.mmdb")
 
-    # 2. 并发抓取所有源
     all_urls = []
     with ThreadPoolExecutor(max_workers=5) as ex:
         futures = {ex.submit(fetch_source, s): s for s in SOURCES}
@@ -221,7 +208,6 @@ def main():
 
     print(f"[TOTAL RAW URLs] {len(all_urls)}")
 
-    # 3. 解析节点
     nodes = []
     for url in all_urls:
         n = parse_node_url(url)
@@ -230,7 +216,6 @@ def main():
 
     print(f"[PARSED] {len(nodes)} nodes with IP/port")
 
-    # 4. IP:Port 去重
     seen = set()
     unique_nodes = []
     for n in nodes:
@@ -241,7 +226,6 @@ def main():
 
     print(f"[DEDUP] {len(unique_nodes)} unique endpoints (dropped {len(nodes)-len(unique_nodes)} dupes)")
 
-    # 5. 并发 TCP+TLS 测试（并发数 100）
     alive_nodes = []
     print(f"[TEST] Testing {len(unique_nodes)} nodes with {LATENCY_TIMEOUT}s timeout...")
 
@@ -254,12 +238,10 @@ def main():
                 if i % 50 == 0:
                     print(f"  Progress: {i}/{len(unique_nodes)}, alive so far: {len(alive_nodes)}")
 
-    # 按 score 排序
     alive_nodes.sort(key=lambda x: x["score"])
 
     print(f"[CONN PASS] {len(alive_nodes)} nodes (TCP+TLS tested)")
 
-    # 6. Geo 过滤
     geo_passed = []
     other_nodes = []
 
@@ -273,7 +255,6 @@ def main():
 
     print(f"[GEO] Target countries ({','.join(GEO_COUNTRIES)}): {len(geo_passed)} nodes")
 
-    # 亚洲节点不足时，补充欧美低延迟节点
     MIN_NODES = 50
     if len(geo_passed) < MIN_NODES:
         supplement = [n for n in other_nodes if n["tcp_latency"] < 500][:MIN_NODES - len(geo_passed)]
@@ -282,14 +263,12 @@ def main():
 
     geo_reader.close()
 
-    # 7. 分级输出
     tier_a = [n for n in geo_passed if n["tcp_latency"] < 100]
     tier_b = [n for n in geo_passed if 100 <= n["tcp_latency"] < 300]
     tier_c = [n for n in geo_passed if 300 <= n["tcp_latency"] <= MAX_LATENCY_MS]
 
     final_nodes = tier_a + tier_b + tier_c
 
-    # 限制总数，适配 Hiddify
     MAX_OUTPUT = 150
     final_nodes = final_nodes[:MAX_OUTPUT]
 
@@ -298,32 +277,26 @@ def main():
     print(f"  Tier B (100-300ms): {len(tier_b)}")
     print(f"  Tier C (300-2000ms): {len(tier_c)}")
 
-    # 统计国家分布
     country_dist = {}
     for n in final_nodes:
         c = n.get("country", "??")
         country_dist[c] = country_dist.get(c, 0) + 1
     print(f"  Countries: {json.dumps(country_dist, ensure_ascii=False)}")
 
-    # 8. 输出文件
     os.makedirs("output", exist_ok=True)
 
-    # 8.1 原始节点列表（按质量排序）
     with open("output/nodes.txt", "w", encoding="utf-8") as f:
         for n in final_nodes:
             f.write(n["raw"] + "\n")
 
-    # 8.2 Base64 编码订阅
     raw_text = "\n".join(n["raw"] for n in final_nodes)
     b64_text = base64.b64encode(raw_text.encode()).decode()
     with open("output/nodes_base64.txt", "w") as f:
         f.write(b64_text)
 
-    # 8.3 通用订阅格式
     with open("output/sub", "w") as f:
         f.write(b64_text)
 
-    # 8.4 生成报告
     report = {
         "timestamp": datetime.now().isoformat(),
         "raw_fetched": len(all_urls),
