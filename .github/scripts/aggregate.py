@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Node Aggregator: Multi-source -> Geo filter -> CF WS+CDN -> Latency test -> Base64 + Plain
-Sources: Pawdroid, ripaojiedian, mfuu, aiboboxx, ermaozi, free18, wenpblog(scrape), public pools
+Sources: Pawdroid, ripaojiedian, mfuu, ermaozi, snakem982, peasoft, mahdibland, v2rayse(0800/2000)
 """
 
 import base64
@@ -22,22 +22,15 @@ import yaml
 
 # ============================ CONFIG ============================
 SOURCES = [
-    # GitHub raw / standard subscriptions (v2rayse handled dynamically below)
+    # GitHub raw / standard subscriptions
     "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
     "https://raw.githubusercontent.com/ripaojiedian/freenode/main/sub",
     "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray",
-    "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2",
     "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
-    "https://raw.githubusercontent.com/free18/v2ray/main/v2",
     "https://raw.githubusercontent.com/snakem982/proxypool/main/source/clash-meta.yaml",
     "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt",
     "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity",
-    "https://raw.githubusercontent.com/Ruk1ng001/freeSub/main/clash.yaml",
-    "https://raw.githubusercontent.com/anaer/Sub/main/clash.yaml",
-    # wenpblog.com (HTML scrape placeholder — we fetch and regex extract URIs)
-    "https://www.wenpblog.com/",
-    # Additional mirrors / pools (commented if unstable; uncomment to enable)
-    # "https://fastly.jsdelivr.net/gh/Pawdroid/Free-servers@main/sub",
+    # v2rayse handled dynamically in main()
 ]
 
 # Classic public SS pool endpoints using common password amazonskr05
@@ -85,66 +78,11 @@ def fetch(url: str, timeout: int = 30) -> bytes:
         return b""
 
 
-
-
-def fetch_html(url: str, timeout: int = 15) -> str:
-    data = fetch(url, timeout)
-    return data.decode("utf-8", errors="ignore")
-
-
-def get_v2rayse_urls(days_back: int = 3) -> list:
-    """
-    v2rayse.com stores daily nodes under /fs/public/YYYYMMDD/<random>.txt
-    We probe recent dates and try to extract file links from directory listing
-    or fallback to cfmem.com daily posts.
-    """
-    urls = []
-    today = datetime.utcnow() + timedelta(hours=8)  # Approx Beijing time
-
-    # Strategy 1: Try to list directory HTML for recent days
-    for i in range(days_back):
-        date_str = (today - timedelta(days=i)).strftime("%Y%m%d")
-        dir_url = f"https://v2rayse.com/fs/public/{date_str}/"
-        html = fetch_html(dir_url, timeout=10)
-        if not html:
-            continue
-        # Look for href links ending with .txt .yaml .json
-        found = [m[1] for m in re.findall(r'href=(["\'])(.+?\.(?:txt|yaml|json))\1', html)]
-        for fname in found:
-            if fname.startswith("http"):
-                urls.append(fname)
-            else:
-                urls.append(urllib.parse.urljoin(dir_url, fname))
-        if found:
-            log(f"[V2RAYSE] Found {len(found)} files for {date_str}")
-            break  # Use the most recent day that has files
-
-    # Strategy 2: Fallback to cfmem.com latest posts (they mirror v2rayse daily)
-    if not urls:
-        log("[V2RAYSE] Directory listing failed, trying cfmem.com fallback...")
-        cfmem_html = fetch_html("https://www.cfmem.com/", timeout=15)
-        if cfmem_html:
-            # Extract v2rayse links from recent articles
-            v2_links = re.findall(
-            r"https://v2rayse\.com/fs/public/\d{8}/[^\s\"\'<>]+\.(?:txt|yaml|json)",
-                cfmem_html
-            )
-            # Also match the older fs.v2rayse.com/share format
-            v2_links += re.findall(
-            r"https://fs\.v2rayse\.com/share/\d{8}/[^\s\"\'<>]+\.(?:txt|yaml|json)",
-                cfmem_html
-            )
-            urls = list(dict.fromkeys(v2_links))  # dedup preserve order
-            log(f"[V2RAYSE] cfmem fallback: {len(urls)} links")
-
-    return urls
-
 def decode_sub(data: bytes) -> str:
     text = data.decode("utf-8", errors="ignore")
     # If it looks like base64 (long continuous alphanumeric+/=)
     if len(text) > 40 and not text.strip().startswith(("{", "[", "proxies:")):
         try:
-            # Try strict base64 first
             decoded = base64.b64decode(text).decode("utf-8", errors="ignore")
             if "vmess://" in decoded or "vless://" in decoded or "trojan://" in decoded or "ss://" in decoded:
                 return decoded
@@ -399,13 +337,46 @@ def maybe_convert(raw: str, proto: str, cf_ip: str, cf_domain: str) -> str:
     return raw
 
 
+# ============================ V2RAYSE ============================
+
+def get_v2rayse_urls(days_back: int = 3) -> list:
+    """
+    v2rayse.com publishes two daily files:
+      /fs/public/YYYYMMDD/free-node-share-0800.txt
+      /fs/public/YYYYMMDD/free-node-share-2000.txt
+    We probe recent dates until both files (or at least one) respond 200.
+    """
+    urls = []
+    today = datetime.utcnow() + timedelta(hours=8)  # Approx Beijing time
+    
+    for i in range(days_back):
+        date_str = (today - timedelta(days=i)).strftime("%Y%m%d")
+        candidates = [
+            f"https://v2rayse.com/fs/public/{date_str}/free-node-share-0800.txt",
+            f"https://v2rayse.com/fs/public/{date_str}/free-node-share-2000.txt",
+        ]
+        day_ok = False
+        for url in candidates:
+            data = fetch(url, timeout=10)
+            if data and len(data) > 100:
+                urls.append(url)
+                day_ok = True
+                log(f"[V2RAYSE] OK {url}")
+            else:
+                log(f"[V2RAYSE] MISS {url}")
+        if day_ok:
+            break  # Use the most recent day that has files
+    
+    return urls
+
+
 # ============================ MAIN ============================
 
 def main():
     best_cf_ip = pick_best_cf_ip()
     all_nodes: list[dict] = []
 
-    # 0. Fetch v2rayse date-based folders
+    # 0. Fetch v2rayse date-based files (0800 & 2000)
     v2rayse_urls = get_v2rayse_urls(days_back=3)
     for url in v2rayse_urls:
         log(f"[FETCH] {url}")
@@ -427,7 +398,6 @@ def main():
         if not data:
             continue
         text = decode_sub(data)
-        # Detect YAML
         if text.strip().startswith(("proxies:", "---", "port:")) or "proxies:" in text[:500]:
             nodes = parse_clash_yaml(text)
         else:
@@ -574,7 +544,7 @@ def main():
     log("Outputs       : output/nodes.txt | output/nodes_base64.txt | output/sub")
     log("==============================")
 
-    # Fail the job if zero nodes so Pages doesn't deploy stale empty file
+    # Fail the job if zero nodes so Pages does not deploy stale empty file
     if len(final) == 0:
         log("[WARN] Zero nodes survived filtering; keeping previous artifact if any.")
         sys.exit(0)
