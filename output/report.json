@@ -1,19 +1,15 @@
 {
-  "timestamp": "2026-05-19 03:47:52 UTC",
-  "cf_ip": "104.17.1.0",
-  "cf_domain": "basebar.pages.dev",
-  "total_raw": 1101,
-  "geo_filtered": 160,
-  "pre_alive": 767,
-  "alive": 160,
-  "final_unique": 156,
+  "timestamp": "2026-05-19 04:06:55 UTC",
+  "total_raw": 1100,
+  "pre_alive": 764,
+  "geo_filtered": 156,
+  "final_unique": 153,
   "countries": {
-    "JP": 31,
-    "SG": 34,
-    "HK": 35,
+    "SG": 35,
+    "JP": 26,
+    "HK": 36,
     "KR": 50,
     "TW": 4,
     "MY": 2
-  },
-  "converted_count": 0
+  }
 }
