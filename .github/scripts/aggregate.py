@@ -20,6 +20,8 @@ from pathlib import Path
 
 import yaml
 
+import maxminddb
+
 # ============================ CONFIG ============================
 SOURCES = [
     # GitHub raw / standard subscriptions
@@ -193,18 +195,30 @@ def parse_clash_yaml(text: str) -> list:
 
 # ============================ GEO IP ============================
 
+GEO_READER = None
+
 def get_ip_info(ip: str) -> dict | None:
     if ip in GEO_CACHE:
         return GEO_CACHE[ip]
+    global GEO_READER
+    if GEO_READER is None:
+        db_path = "GeoLite2-Country.mmdb"
+        if not Path(db_path).exists():
+            db_path = "/mnt/agents/output/GeoLite2-Country.mmdb"
+        try:
+            GEO_READER = maxminddb.open_database(db_path)
+        except Exception as e:
+            log(f"[GEO DB ERR] {e}")
+            GEO_CACHE[ip] = None
+            return None
     try:
-        url = f"http://ip-api.com/json/{ip}?fields=countryCode,as,query,status,message"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read())
-        if data.get("status") == "success":
+        rec = GEO_READER.get(ip)
+        if rec and "country" in rec and "iso_code" in rec["country"]:
+            cc = rec["country"]["iso_code"]
+            data = {"countryCode": cc, "status": "success", "query": ip, "as": ""}
             GEO_CACHE[ip] = data
             return data
-    except Exception as e:
+    except Exception:
         pass
     GEO_CACHE[ip] = None
     return None
@@ -447,10 +461,26 @@ def main():
 
     log(f"[ENRICHED] {len(enriched)} nodes with IP/port")
 
-    # 4. Geo filter (rate-limited)
+    # 4. Latency test FIRST on raw IPs (kill dead nodes before geo lookup)
+    log("[LATENCY] TCP probing raw nodes...")
+    pre_alive = []
+    with ThreadPoolExecutor(max_workers=40) as ex:
+        futs = {ex.submit(node_tcp_ping, n["ip"], int(n["port"])): n for n in enriched}
+        for fut in as_completed(futs):
+            n = futs[fut]
+            lat = fut.result()
+            if 0 < lat <= MAX_LATENCY_MS:
+                n["latency_ms"] = round(lat, 1)
+                pre_alive.append(n)
+            else:
+                log(f"  DEAD {n['ip']}:{n['port']} {lat:.0f}ms")
+
+    log(f"[LATENCY PASS] {len(pre_alive)} nodes")
+
+    # 5. Geo filter (local DB, only on alive nodes)
     log("[GEO] Filtering target countries (HK/TW/JP/SG/MY/KR)...")
     geo_passed = []
-    for idx, n in enumerate(enriched):
+    for n in pre_alive:
         ip = n["ip"]
         info = get_ip_info(ip)
         if info:
@@ -459,16 +489,10 @@ def main():
                 n["country"] = cc
                 n["as_info"] = info.get("as", "")
                 geo_passed.append(n)
-        # ip-api free limit ~45/min; sleep to be safe
-        if (idx + 1) % 40 == 0:
-            log("  [GEO] Rate-limit sleep 70s...")
-            time.sleep(70)
-        else:
-            time.sleep(0.05)
 
     log(f"[GEO PASS] {len(geo_passed)} nodes")
 
-    # 5. Convert TCP -> WS+CDN
+    # 6. Convert TCP -> WS+CDN
     log("[CONV] Converting eligible TCP nodes to WS+CDN...")
     converted = []
     for n in geo_passed:
@@ -477,21 +501,8 @@ def main():
         n["converted"] = new_raw != n["raw"]
         converted.append(n)
 
-    # 6. Latency test
-    log("[LATENCY] TCP probing nodes...")
-    alive = []
-    with ThreadPoolExecutor(max_workers=40) as ex:
-        futs = {ex.submit(node_tcp_ping, n["ip"], int(n["port"])): n for n in converted}
-        for fut in as_completed(futs):
-            n = futs[fut]
-            lat = fut.result()
-            if 0 < lat <= MAX_LATENCY_MS:
-                n["latency_ms"] = round(lat, 1)
-                alive.append(n)
-                log(f"  OK {n['ip']}:{n['port']} {lat:.0f}ms [{n.get('country','')}]")
-            else:
-                log(f"  FAIL {n['ip']}:{n['port']} {lat:.0f}ms")
-
+    # 7. Final alive (all converted nodes are considered alive; optional re-test CF IP)
+    alive = converted
     log(f"[ALIVE] {len(alive)} nodes")
 
     # 7. Deduplicate by raw URI
@@ -520,6 +531,7 @@ def main():
         "cf_domain": CF_PAGES_DOMAIN,
         "total_raw": len(all_nodes),
         "geo_filtered": len(geo_passed),
+        "pre_alive": len(pre_alive),
         "alive": len(alive),
         "final_unique": len(final),
         "countries": {},
