@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-优化版节点聚合脚本（修复 urllib API 兼容性）
-改进点：
-1. 修复 urllib.request.Request timeout 参数问题
-2. 异步并发测试
-3. TCP+TLS 双层测试
-4. 智能分级输出
-5. 放宽地理限制
+优化版节点聚合脚本（最终修复版）
+修复：
+1. urllib.request timeout 参数位置
+2. 正则表达式使用非捕获组 (?:) 而非捕获组 ()
+3. 异步并发测试
+4. TCP+TLS 双层测试
+5. 智能分级输出
 """
 
 import os
@@ -54,8 +54,10 @@ def decode_base64(data: str) -> str:
         return ""
 
 def extract_nodes(text: str) -> list:
+    """提取节点链接（修复：使用非捕获组）"""
     text = decode_base64(text) if not text.startswith(('vmess://', 'vless://', 'trojan://', 'ss://')) else text
-    pattern = r'(vmess://|vless://|trojan://|ss://|ssr://)[^\s]+'
+    # 关键修复：(?:) 非捕获组，否则 re.findall 只返回协议头
+    pattern = r'(?:vmess://|vless://|trojan://|ss://|ssr://)[^\s]+'
     return re.findall(pattern, text)
 
 def parse_node_url(url: str) -> dict:
@@ -167,7 +169,7 @@ def get_country(ip: str, geo_reader) -> str:
 # ============ 主流程 ============
 
 def fetch_source(source: dict) -> list:
-    """修复版：timeout 传给 urlopen() 而非 Request()"""
+    """修复版：timeout 传给 urlopen()"""
     url = source["url"].format(date=datetime.now().strftime("%Y%m%d"))
     try:
         req = urllib.request.Request(
@@ -177,7 +179,6 @@ def fetch_source(source: dict) -> list:
                 "Accept": "text/plain,*/*"
             }
         )
-        # 关键修复：timeout 传给 urlopen，不是 Request
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = resp.read().decode('utf-8', errors='ignore')
             nodes = extract_nodes(data)
