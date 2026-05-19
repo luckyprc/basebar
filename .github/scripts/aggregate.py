@@ -24,7 +24,7 @@ import maxminddb
 
 # ============ 配置 ============
 LATENCY_TIMEOUT = int(os.getenv("LATENCY_TIMEOUT", "2"))
-MAX_LATENCY_MS = int(os.getenv("MAX_LATENCY_MS", "2000"))
+MAX_LATENCY_MS = int(os.getenv("MAX_LATENCY_MS", "260"))
 GEO_COUNTRIES = os.getenv("GEO_COUNTRIES", "HK,TW,JP,SG,MY,KR").split(",")
 
 # 订阅源
@@ -258,7 +258,7 @@ def main():
 
     MIN_NODES = 50
     if len(geo_passed) < MIN_NODES:
-        supplement = [n for n in other_nodes if n["tcp_latency"] < 500][:MIN_NODES - len(geo_passed)]
+        supplement = [n for n in other_nodes if n["tcp_latency"] < 260][:MIN_NODES - len(geo_passed)]
         geo_passed.extend(supplement)
         print(f"[GEO] Supplemented {len(supplement)} low-latency non-Asia nodes")
 
@@ -266,11 +266,11 @@ def main():
 
     tier_a = [n for n in geo_passed if n["tcp_latency"] < 100]
     tier_b = [n for n in geo_passed if 100 <= n["tcp_latency"] < 300]
-    tier_c = [n for n in geo_passed if 300 <= n["tcp_latency"] <= MAX_LATENCY_MS]
+    tier_c = [n for n in geo_passed if 200 <= n["tcp_latency"] <= MAX_LATENCY_MS]
 
     final_nodes = tier_a + tier_b + tier_c
 
-    MAX_OUTPUT = 150
+    MAX_OUTPUT = 80
     final_nodes = final_nodes[:MAX_OUTPUT]
 
     print(f"[FINAL] {len(final_nodes)} nodes")
