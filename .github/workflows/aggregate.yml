@@ -1,4 +1,4 @@
-name: Node Aggregator CF-Asia
+name: Node Aggregator
 on:
   schedule:
     - cron: '0 1 * * *'   # UTC 01:00 = Beijing 09:00
@@ -36,7 +36,6 @@ jobs:
 
       - name: Run aggregator script
         env:
-          CF_PAGES_DOMAIN: ${{ secrets.CF_PAGES_DOMAIN }}
           MAX_LATENCY_MS: "3000"
           LATENCY_TIMEOUT: "3"
         run: |
