@@ -265,8 +265,8 @@ def main():
     geo_reader.close()
 
     tier_a = [n for n in geo_passed if n["tcp_latency"] < 100]
-    tier_b = [n for n in geo_passed if 100 <= n["tcp_latency"] < 300]
-    tier_c = [n for n in geo_passed if 200 <= n["tcp_latency"] <= MAX_LATENCY_MS]
+    tier_b = [n for n in geo_passed if 100 <= n["tcp_latency"] < 200]
+    tier_c = [n for n in geo_passed if 200 <= n["tcp_latency"] <= 260]
 
     final_nodes = tier_a + tier_b + tier_c
 
@@ -275,8 +275,8 @@ def main():
 
     print(f"[FINAL] {len(final_nodes)} nodes")
     print(f"  Tier A (<100ms): {len(tier_a)}")
-    print(f"  Tier B (100-300ms): {len(tier_b)}")
-    print(f"  Tier C (300-2000ms): {len(tier_c)}")
+    print(f"  Tier B (100-200ms): {len(tier_b)}")
+    print(f"  Tier C (200-260ms): {len(tier_c)}")
 
     country_dist = {}
     for n in final_nodes:
