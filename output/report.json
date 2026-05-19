@@ -1,15 +1,25 @@
 {
-  "timestamp": "2026-05-19 04:56:17 UTC",
-  "total_raw": 773,
-  "enriched": 583,
-  "deduped_ip_port": 320,
-  "conn_alive": 254,
-  "geo_passed": 94,
-  "final_unique": 94,
-  "countries": {
-    "SG": 19,
-    "JP": 20,
-    "HK": 24,
-    "KR": 31
-  }
+  "timestamp": "2026-05-19T05:13:13.428848",
+  "raw_fetched": 0,
+  "parsed": 0,
+  "deduped": 0,
+  "alive": 0,
+  "geo_passed": 0,
+  "final": 0,
+  "tier_distribution": {
+    "A": 0,
+    "B": 0,
+    "C": 0
+  },
+  "countries": {},
+  "sources": [
+    "https://v2rayse.com/fs/public/{date}/free-node-share-0800.txt",
+    "https://v2rayse.com/fs/public/{date}/free-node-share-2000.txt",
+    "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
+    "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray",
+    "https://glasspanelfree.betsyangel.ndjp.net/sub",
+    "https://liyan1236.ccwu.cc/sub?token=1e33160d4f679f921a2fc44c83b94c33",
+    "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2",
+    "https://raw.githubusercontent.com/Barabama/FreeNodes/main/nodes/merged.txt"
+  ]
 }
