@@ -224,72 +224,39 @@ def get_ip_info(ip: str) -> dict | None:
 
 # ============================ TCP PING ============================
 
-def test_tcp(ip: str, port: int, timeout: int = 2) -> float:
-    """Basic TCP connect + optional TLS handshake (for TLS ports)."""
+def test_real_connection(ip: str, port: int, sni: str) -> tuple[bool, float]:
+    """
+    Real connection test:
+    - Non-TLS ports: TCP connect only
+    - TLS ports: TCP + TLS handshake with SNI
+    Returns (ok, latency_ms).
+    """
     try:
         t0 = time.time()
-        sock = socket.create_connection((ip, port), timeout=timeout)
-
-        # For TLS ports, do a real TLS handshake with SNI
-        if port in TLS_PORTS:
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            sock = context.wrap_socket(sock, server_hostname=ip)
-
-        sock.close()
-        return (time.time() - t0) * 1000
-    except Exception:
-        return 99999.0
-
-
-# ============================ REAL HTTP 204 TEST ============================
-
-TLS_PORTS = {443, 8443, 2053, 2083, 2087, 2096}
-
-def test_http_204(ip: str, port: int, sni: str) -> tuple[bool, int]:
-    """
-    Connect to ip:port and send HTTP GET /generate_204.
-    For TLS ports, wrap socket with SNI first.
-    Returns (ok, status_code).
-    """
-    try:
         sock = socket.create_connection((ip, port), timeout=5)
-    except Exception:
-        return False, 0
-
-    try:
+        
         if port in TLS_PORTS:
             hostname = sni if sni else ip
             context = ssl.create_default_context()
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
             sock = context.wrap_socket(sock, server_hostname=hostname)
-
-        req = f"GET /generate_204 HTTP/1.1\r\nHost: {sni or ip}\r\nConnection: close\r\n\r\n"
-        sock.sendall(req.encode())
-
-        resp = sock.recv(4096)
+        
         sock.close()
-
-        if not resp:
-            return False, 0
-
-        first_line = resp.split(b"\r\n")[0].decode("utf-8", errors="ignore")
-        match = re.search(r"HTTP/1\\.\\d\s+(\d+)", first_line)
-        if match:
-            code = int(match.group(1))
-            if code in (200, 204):
-                return True, code
-            return False, code
-        return False, 0
+        lat = (time.time() - t0) * 1000
+        return True, lat
     except Exception:
         try:
             sock.close()
         except Exception:
             pass
-        return False, 0
+        return False, 99999.0
 
+
+
+# ============================ REAL HTTP 204 TEST ============================
+
+TLS_PORTS = {443, 8443, 2053, 2083, 2087, 2096}
 
 # ============================ V2RAYSE ============================
 
