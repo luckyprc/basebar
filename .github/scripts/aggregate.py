@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Node Aggregator: Multi-source -> Latency test -> Geo filter -> Base64 + Plain
+Node Aggregator: Multi-source -> IP:port dedup -> HTTP 204 real test -> Geo filter -> Base64 + Plain
 Sources: Pawdroid, ripaojiedian, mfuu, ermaozi, snakem982, peasoft, mahdibland, v2rayse(0800/2000)
 """
 
@@ -10,6 +10,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import sys
 import time
 import urllib.parse
@@ -56,7 +57,7 @@ def fetch(url: str, timeout: int = 30) -> bytes:
         req = urllib.request.Request(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
         )
@@ -122,14 +123,9 @@ def parse_clash_yaml(text: str) -> list:
 
             if t == "vmess":
                 cfg = {
-                    "v": "2",
-                    "ps": name,
-                    "add": server,
-                    "port": str(port),
-                    "id": p.get("uuid", ""),
-                    "aid": str(p.get("alterId", 0)),
-                    "scy": p.get("cipher", "auto"),
-                    "net": p.get("network", "tcp"),
+                    "v": "2", "ps": name, "add": server, "port": str(port),
+                    "id": p.get("uuid", ""), "aid": str(p.get("alterId", 0)),
+                    "scy": p.get("cipher", "auto"), "net": p.get("network", "tcp"),
                     "type": p.get("type", "none"),
                     "host": p.get("ws-opts", {}).get("headers", {}).get("Host", p.get("servername", "")),
                     "path": p.get("ws-opts", {}).get("path", "/"),
@@ -138,41 +134,61 @@ def parse_clash_yaml(text: str) -> list:
                 }
                 b64 = base64.b64encode(json.dumps(cfg, ensure_ascii=False).encode()).decode()
                 nodes.append({"raw": f"vmess://{b64}", "proto": "vmess"})
-
             elif t == "vless":
                 qs = {
                     "encryption": p.get("flow", "none") or "none",
                     "security": "tls" if p.get("tls", False) else "none",
-                    "sni": p.get("servername", ""),
-                    "type": p.get("network", "tcp"),
+                    "sni": p.get("servername", ""), "type": p.get("network", "tcp"),
                     "host": p.get("ws-opts", {}).get("headers", {}).get("Host", ""),
-                    "path": p.get("ws-opts", {}).get("path", "/"),
-                    "fp": "chrome",
+                    "path": p.get("ws-opts", {}).get("path", "/"), "fp": "chrome",
                 }
                 qs_str = urllib.parse.urlencode({k: v for k, v in qs.items() if v})
                 raw = f"vless://{p.get('uuid', '')}@{server}:{port}?{qs_str}#{urllib.parse.quote(name)}"
                 nodes.append({"raw": raw, "proto": "vless"})
-
             elif t == "trojan":
                 qs = {
                     "security": "tls" if p.get("tls", False) else "none",
-                    "sni": p.get("sni", ""),
-                    "type": p.get("network", "tcp"),
+                    "sni": p.get("sni", ""), "type": p.get("network", "tcp"),
                     "host": p.get("ws-opts", {}).get("headers", {}).get("Host", ""),
                     "path": p.get("ws-opts", {}).get("path", "/"),
                 }
                 qs_str = urllib.parse.urlencode({k: v for k, v in qs.items() if v})
                 raw = f"trojan://{p.get('password', '')}@{server}:{port}?{qs_str}#{urllib.parse.quote(name)}"
                 nodes.append({"raw": raw, "proto": "trojan"})
-
             elif t == "ss":
                 userinfo = base64.b64encode(f"{p.get('cipher', 'aes-256-gcm')}:{p.get('password', '')}".encode()).decode()
                 raw = f"ss://{userinfo}@{server}:{port}#{urllib.parse.quote(name)}"
                 nodes.append({"raw": raw, "proto": "ss"})
-
         except Exception:
             continue
     return nodes
+
+
+# ============================ EXTRACT META ============================
+
+def extract_node_meta(raw: str, proto: str) -> dict | None:
+    """Extract ip, port, sni from a node URI."""
+    try:
+        if proto == "vmess":
+            b64 = raw.replace("vmess://", "").strip()
+            b64 += "=" * (-len(b64) % 4)
+            cfg = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
+            return {
+                "ip": cfg.get("add"),
+                "port": int(cfg.get("port", 0)),
+                "sni": cfg.get("sni", "") or cfg.get("host", ""),
+            }
+        elif proto in ("vless", "trojan"):
+            url = urllib.parse.urlparse(raw)
+            qs = urllib.parse.parse_qs(url.query)
+            sni = qs.get("sni", [""])[0] or qs.get("host", [""])[0] or url.hostname or ""
+            return {"ip": url.hostname, "port": url.port or 0, "sni": sni}
+        elif proto in ("ss", "ssr"):
+            url = urllib.parse.urlparse(raw)
+            return {"ip": url.hostname, "port": url.port or 0, "sni": ""}
+    except Exception:
+        return None
+    return None
 
 
 # ============================ GEO IP ============================
@@ -206,9 +222,9 @@ def get_ip_info(ip: str) -> dict | None:
     return None
 
 
-# ============================ LATENCY ============================
+# ============================ TCP PING ============================
 
-def test_tcp(ip: str, port: int = 443, timeout: int = 2) -> float:
+def test_tcp(ip: str, port: int, timeout: int = 2) -> float:
     try:
         t0 = time.time()
         sock = socket.create_connection((ip, port), timeout=timeout)
@@ -218,8 +234,52 @@ def test_tcp(ip: str, port: int = 443, timeout: int = 2) -> float:
         return 99999.0
 
 
-def node_tcp_ping(ip: str, port: int) -> float:
-    return test_tcp(ip, int(port), LATENCY_TIMEOUT)
+# ============================ REAL HTTP 204 TEST ============================
+
+TLS_PORTS = {443, 8443, 2053, 2083, 2087, 2096}
+
+def test_http_204(ip: str, port: int, sni: str) -> tuple[bool, int]:
+    """
+    Connect to ip:port and send HTTP GET /generate_204.
+    For TLS ports, wrap socket with SNI first.
+    Returns (ok, status_code).
+    """
+    try:
+        sock = socket.create_connection((ip, port), timeout=5)
+    except Exception:
+        return False, 0
+
+    try:
+        if port in TLS_PORTS:
+            hostname = sni if sni else ip
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(sock, server_hostname=hostname)
+
+        req = f"GET /generate_204 HTTP/1.1\r\nHost: {sni or ip}\r\nConnection: close\r\n\r\n"
+        sock.sendall(req.encode())
+
+        resp = sock.recv(4096)
+        sock.close()
+
+        if not resp:
+            return False, 0
+
+        first_line = resp.split(b"\r\n")[0].decode("utf-8", errors="ignore")
+        match = re.search(r"HTTP/1\.\d\s+(\d+)", first_line)
+        if match:
+            code = int(match.group(1))
+            if code in (200, 204):
+                return True, code
+            return False, code
+        return False, 0
+    except Exception:
+        try:
+            sock.close()
+        except Exception:
+            pass
+        return False, 0
 
 
 # ============================ V2RAYSE ============================
@@ -252,7 +312,7 @@ def get_v2rayse_urls(days_back: int = 3) -> list:
 def main():
     all_nodes: list[dict] = []
 
-    # 0. Fetch v2rayse date-based files (0800 & 2000)
+    # 0. Fetch v2rayse
     v2rayse_urls = get_v2rayse_urls(days_back=3)
     for url in v2rayse_urls:
         log(f"[FETCH] {url}")
@@ -281,7 +341,7 @@ def main():
         log(f"  -> {len(nodes)} nodes")
         all_nodes.extend(nodes)
 
-    # 2. Fetch SS pools (if any)
+    # 2. Fetch SS pools
     for url in SS_POOLS:
         log(f"[FETCH SS] {url}")
         data = fetch(url)
@@ -293,78 +353,85 @@ def main():
 
     log(f"[TOTAL RAW] {len(all_nodes)} nodes")
 
-    # 3. Enrich: parse IP/port
+    # 3. Enrich: parse IP/port/SNI
     enriched = []
     for n in all_nodes:
-        raw = n["raw"]
-        proto = n["proto"]
-        ip = None
-        port = None
-        try:
-            if proto == "vmess":
-                b64 = raw.replace("vmess://", "").strip()
-                b64 += "=" * (-len(b64) % 4)
-                cfg = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
-                ip = cfg.get("add")
-                port = cfg.get("port")
-            elif proto in ("vless", "trojan"):
-                url = urllib.parse.urlparse(raw)
-                ip = url.hostname
-                port = url.port
-            elif proto in ("ss", "ssr"):
-                url = urllib.parse.urlparse(raw)
-                ip = url.hostname
-                port = url.port
-        except Exception:
-            pass
-
-        if ip and port:
-            enriched.append({"raw": raw, "proto": proto, "ip": str(ip), "port": str(port)})
+        meta = extract_node_meta(n["raw"], n["proto"])
+        if meta and meta["ip"] and meta["port"]:
+            enriched.append({
+                "raw": n["raw"],
+                "proto": n["proto"],
+                "ip": str(meta["ip"]),
+                "port": int(meta["port"]),
+                "sni": str(meta.get("sni", "")),
+            })
 
     log(f"[ENRICHED] {len(enriched)} nodes with IP/port")
 
-    # 4. Latency test first (kill dead nodes before geo lookup)
-    log("[LATENCY] TCP probing raw nodes...")
-    pre_alive = []
+    # 4. DEDUPLICATE by IP:port (keep first)
+    seen = {}
+    deduped = []
+    for n in enriched:
+        key = (n["ip"], n["port"])
+        if key not in seen:
+            seen[key] = True
+            deduped.append(n)
+    log(f"[DEDUP IP:PORT] {len(deduped)} unique endpoints (dropped {len(enriched) - len(deduped)} dupes)")
+
+    # 5. TCP ping pre-filter
+    log("[TCP] Pre-filtering dead endpoints...")
+    tcp_alive = []
     with ThreadPoolExecutor(max_workers=40) as ex:
-        futs = {ex.submit(node_tcp_ping, n["ip"], int(n["port"])): n for n in enriched}
+        futs = {ex.submit(test_tcp, n["ip"], n["port"], 2): n for n in deduped}
         for fut in as_completed(futs):
             n = futs[fut]
             lat = fut.result()
             if 0 < lat <= MAX_LATENCY_MS:
-                n["latency_ms"] = round(lat, 1)
-                pre_alive.append(n)
+                n["tcp_ms"] = round(lat, 1)
+                tcp_alive.append(n)
             else:
                 log(f"  DEAD {n['ip']}:{n['port']} {lat:.0f}ms")
+    log(f"[TCP PASS] {len(tcp_alive)} nodes")
 
-    log(f"[LATENCY PASS] {len(pre_alive)} nodes")
+    # 6. REAL HTTP 204 test (only on TCP-alive nodes)
+    log("[HTTP] Testing real HTTP 200/204 on endpoints...")
+    http_alive = []
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        futs = {ex.submit(test_http_204, n["ip"], n["port"], n["sni"]): n for n in tcp_alive}
+        for fut in as_completed(futs):
+            n = futs[fut]
+            ok, code = fut.result()
+            if ok:
+                n["http_code"] = code
+                http_alive.append(n)
+                log(f"  OK {n['ip']}:{n['port']} HTTP {code}")
+            else:
+                log(f"  FAIL {n['ip']}:{n['port']} HTTP {code}")
+    log(f"[HTTP PASS] {len(http_alive)} nodes (200/204)")
 
-    # 5. Geo filter (local DB, only on alive nodes)
+    # 7. Geo filter (only on HTTP-alive nodes)
     log("[GEO] Filtering target countries (HK/TW/JP/SG/MY/KR)...")
     geo_passed = []
-    for n in pre_alive:
-        ip = n["ip"]
-        info = get_ip_info(ip)
+    for n in http_alive:
+        info = get_ip_info(n["ip"])
         if info:
             cc = info.get("countryCode", "")
             if cc in TARGET_COUNTRIES:
                 n["country"] = cc
                 n["as_info"] = info.get("as", "")
                 geo_passed.append(n)
-
     log(f"[GEO PASS] {len(geo_passed)} nodes")
 
-    # 6. Deduplicate by raw URI
-    seen = set()
+    # 8. Final dedup by raw URI
+    seen_raw = set()
     final = []
     for n in geo_passed:
-        if n["raw"] not in seen:
-            seen.add(n["raw"])
+        if n["raw"] not in seen_raw:
+            seen_raw.add(n["raw"])
             final.append(n)
-
     log(f"[FINAL] {len(final)} unique nodes")
 
-    # 7. Write outputs
+    # 9. Write outputs
     plain = "\n".join(n["raw"] for n in final)
     (OUT_DIR / "nodes.txt").write_text(plain, encoding="utf-8")
 
@@ -375,8 +442,11 @@ def main():
     report = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
         "total_raw": len(all_nodes),
-        "pre_alive": len(pre_alive),
-        "geo_filtered": len(geo_passed),
+        "enriched": len(enriched),
+        "deduped_ip_port": len(deduped),
+        "tcp_alive": len(tcp_alive),
+        "http_alive": len(http_alive),
+        "geo_passed": len(geo_passed),
         "final_unique": len(final),
         "countries": {},
     }
@@ -387,12 +457,15 @@ def main():
     (OUT_DIR / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
 
     log("\n========== SUMMARY ==========")
-    log(f"Raw fetched   : {len(all_nodes)}")
-    log(f"Latency pass  : {len(pre_alive)}")
-    log(f"Geo passed    : {len(geo_passed)}")
-    log(f"Final unique  : {len(final)}")
-    log("Countries     : " + json.dumps(report["countries"], ensure_ascii=False))
-    log("Outputs       : output/nodes.txt | output/nodes_base64.txt | output/sub")
+    log(f"Raw fetched       : {len(all_nodes)}")
+    log(f"Enriched          : {len(enriched)}")
+    log(f"Deduped (IP:port) : {len(deduped)}")
+    log(f"TCP alive         : {len(tcp_alive)}")
+    log(f"HTTP 200/204      : {len(http_alive)}")
+    log(f"Geo passed        : {len(geo_passed)}")
+    log(f"Final unique      : {len(final)}")
+    log("Countries         : " + json.dumps(report["countries"], ensure_ascii=False))
+    log("Outputs           : output/nodes.txt | output/nodes_base64.txt | output/sub")
     log("==============================")
 
     if len(final) == 0:
