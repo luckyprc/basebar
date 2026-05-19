@@ -225,9 +225,18 @@ def get_ip_info(ip: str) -> dict | None:
 # ============================ TCP PING ============================
 
 def test_tcp(ip: str, port: int, timeout: int = 2) -> float:
+    """Basic TCP connect + optional TLS handshake (for TLS ports)."""
     try:
         t0 = time.time()
         sock = socket.create_connection((ip, port), timeout=timeout)
+
+        # For TLS ports, do a real TLS handshake with SNI
+        if port in TLS_PORTS:
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            sock = context.wrap_socket(sock, server_hostname=ip)
+
         sock.close()
         return (time.time() - t0) * 1000
     except Exception:
@@ -267,7 +276,7 @@ def test_http_204(ip: str, port: int, sni: str) -> tuple[bool, int]:
             return False, 0
 
         first_line = resp.split(b"\r\n")[0].decode("utf-8", errors="ignore")
-        match = re.search(r"HTTP/1\.\d\s+(\d+)", first_line)
+        match = re.search(r"HTTP/1\\.\\d\s+(\d+)", first_line)
         if match:
             code = int(match.group(1))
             if code in (200, 204):
@@ -378,41 +387,26 @@ def main():
             deduped.append(n)
     log(f"[DEDUP IP:PORT] {len(deduped)} unique endpoints (dropped {len(enriched) - len(deduped)} dupes)")
 
-    # 5. TCP ping pre-filter
-    log("[TCP] Pre-filtering dead endpoints...")
-    tcp_alive = []
+    # 5. Real connection test (TCP + TLS handshake for TLS ports)
+    log("[CONN] Testing real connections (TCP + TLS handshake)...")
+    conn_alive = []
     with ThreadPoolExecutor(max_workers=40) as ex:
-        futs = {ex.submit(test_tcp, n["ip"], n["port"], 2): n for n in deduped}
+        futs = {ex.submit(test_real_connection, n["ip"], n["port"], n["sni"]): n for n in deduped}
         for fut in as_completed(futs):
             n = futs[fut]
-            lat = fut.result()
-            if 0 < lat <= MAX_LATENCY_MS:
-                n["tcp_ms"] = round(lat, 1)
-                tcp_alive.append(n)
+            ok, lat = fut.result()
+            if ok and 0 < lat <= MAX_LATENCY_MS:
+                n["conn_ms"] = round(lat, 1)
+                conn_alive.append(n)
+                log(f"  OK {n['ip']}:{n['port']} {lat:.0f}ms")
             else:
                 log(f"  DEAD {n['ip']}:{n['port']} {lat:.0f}ms")
-    log(f"[TCP PASS] {len(tcp_alive)} nodes")
+    log(f"[CONN PASS] {len(conn_alive)} nodes")
 
-    # 6. REAL HTTP 204 test (only on TCP-alive nodes)
-    log("[HTTP] Testing real HTTP 200/204 on endpoints...")
-    http_alive = []
-    with ThreadPoolExecutor(max_workers=30) as ex:
-        futs = {ex.submit(test_http_204, n["ip"], n["port"], n["sni"]): n for n in tcp_alive}
-        for fut in as_completed(futs):
-            n = futs[fut]
-            ok, code = fut.result()
-            if ok:
-                n["http_code"] = code
-                http_alive.append(n)
-                log(f"  OK {n['ip']}:{n['port']} HTTP {code}")
-            else:
-                log(f"  FAIL {n['ip']}:{n['port']} HTTP {code}")
-    log(f"[HTTP PASS] {len(http_alive)} nodes (200/204)")
-
-    # 7. Geo filter (only on HTTP-alive nodes)
+    # 6. Geo filter (only on connection-alive nodes)
     log("[GEO] Filtering target countries (HK/TW/JP/SG/MY/KR)...")
     geo_passed = []
-    for n in http_alive:
+    for n in conn_alive:
         info = get_ip_info(n["ip"])
         if info:
             cc = info.get("countryCode", "")
@@ -422,7 +416,7 @@ def main():
                 geo_passed.append(n)
     log(f"[GEO PASS] {len(geo_passed)} nodes")
 
-    # 8. Final dedup by raw URI
+    # 7. Final dedup by raw URI
     seen_raw = set()
     final = []
     for n in geo_passed:
@@ -431,7 +425,7 @@ def main():
             final.append(n)
     log(f"[FINAL] {len(final)} unique nodes")
 
-    # 9. Write outputs
+    # 8. Write outputs
     plain = "\n".join(n["raw"] for n in final)
     (OUT_DIR / "nodes.txt").write_text(plain, encoding="utf-8")
 
@@ -444,8 +438,7 @@ def main():
         "total_raw": len(all_nodes),
         "enriched": len(enriched),
         "deduped_ip_port": len(deduped),
-        "tcp_alive": len(tcp_alive),
-        "http_alive": len(http_alive),
+        "conn_alive": len(conn_alive),
         "geo_passed": len(geo_passed),
         "final_unique": len(final),
         "countries": {},
@@ -460,8 +453,7 @@ def main():
     log(f"Raw fetched       : {len(all_nodes)}")
     log(f"Enriched          : {len(enriched)}")
     log(f"Deduped (IP:port) : {len(deduped)}")
-    log(f"TCP alive         : {len(tcp_alive)}")
-    log(f"HTTP 200/204      : {len(http_alive)}")
+    log(f"Conn alive        : {len(conn_alive)}")
     log(f"Geo passed        : {len(geo_passed)}")
     log(f"Final unique      : {len(final)}")
     log("Countries         : " + json.dumps(report["countries"], ensure_ascii=False))
