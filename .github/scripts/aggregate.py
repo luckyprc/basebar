@@ -1,441 +1,351 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Node Aggregator: Multi-source -> IP:port dedup -> Real connection test -> Geo filter -> Base64 + Plain
-Sources: v2rayse(0800/2000), Pawdroid, proxypool.link, mfuu/v2ray, glasspanelfree, liyan1236
+优化版节点聚合脚本
+改进点：
+1. 异步并发测试（大幅提升速度）
+2. TCP+TLS 双层测试
+3. 智能分级输出（按延迟分档）
+4. 放宽地理限制，补充低延迟节点
+5. 限制输出数量，适配 Hiddify
 """
 
-import base64
-import json
 import os
 import re
+import json
+import base64
 import socket
 import ssl
-import sys
-import time
-import urllib.parse
 import urllib.request
+import urllib.error
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
-from pathlib import Path
-
-import yaml
+from datetime import datetime
 import maxminddb
 
-# ============================ CONFIG ============================
+# ============ 配置 ============
+LATENCY_TIMEOUT = int(os.getenv("LATENCY_TIMEOUT", "2"))
+MAX_LATENCY_MS = int(os.getenv("MAX_LATENCY_MS", "2000"))
+GEO_COUNTRIES = os.getenv("GEO_COUNTRIES", "HK,TW,JP,SG,MY,KR").split(",")
+REAL_TEST_URL = os.getenv("REAL_TEST_URL", "https://www.google.com/generate_204")
+REAL_TEST_TIMEOUT = int(os.getenv("REAL_TEST_TIMEOUT", "5"))
+
+# 订阅源
 SOURCES = [
-    # Pawdroid (GitHub)
-    "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
-    # proxypool.link (snakem982 v2ray format)
-    "https://raw.githubusercontent.com/snakem982/proxypool/main/source/v2ray.txt",
-    # mfuu/v2ray
-    "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray",
-    # glasspanelfree (Edge subscription)
-    "https://glasspanelfree.betsyangel.ndjp.net/sub",
-    # liyan1236 (Token subscription)
-    "https://liyan1236.ccwu.cc/sub?token=1e33160d4f679f921a2fc44c83b94c33",
-    # v2cross: no stable public subscription URL found; add manually if known
-    # "https://...",
-    # v2rayse handled dynamically in main()
+    {"type": "v2rayse", "url": "https://v2rayse.com/fs/public/{date}/free-node-share-0800.txt"},
+    {"type": "v2rayse", "url": "https://v2rayse.com/fs/public/{date}/free-node-share-2000.txt"},
+    {"type": "raw", "url": "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub"},
+    {"type": "raw", "url": "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray"},
+    {"type": "raw", "url": "https://glasspanelfree.betsyangel.ndjp.net/sub"},
+    {"type": "raw", "url": "https://liyan1236.ccwu.cc/sub?token=1e33160d4f679f921a2fc44c83b94c33"},
+    {"type": "raw", "url": "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2"},
+    {"type": "raw", "url": "https://raw.githubusercontent.com/Barabama/FreeNodes/main/nodes/merged.txt"},
 ]
 
-SS_POOLS = [
-    # "https://example-pool.com/ss/sub",
-]
+# ============ 节点解析 ============
 
-TARGET_COUNTRIES = {"HK", "TW", "JP", "SG", "MY", "KR"}
-MAX_LATENCY_MS = int(os.environ.get("MAX_LATENCY_MS", "3000"))
-LATENCY_TIMEOUT = int(os.environ.get("LATENCY_TIMEOUT", "3"))
-GEO_CACHE: dict = {}
+def decode_base64(data: str) -> str:
+    """增强版 Base64 解码"""
+    data = data.strip()
+    if not data:
+        return ""
+    padding = 4 - len(data) % 4
+    if padding != 4:
+        data += "=" * padding
+    try:
+        return base64.b64decode(data).decode('utf-8', errors='ignore')
+    except Exception:
+        return ""
 
-OUT_DIR = Path("output")
-OUT_DIR.mkdir(exist_ok=True)
+def extract_nodes(text: str) -> list:
+    """从文本中提取所有节点链接"""
+    text = decode_base64(text) if not text.startswith(('vmess://', 'vless://', 'trojan://', 'ss://')) else text
+    pattern = r'(vmess://|vless://|trojan://|ss://|ssr://)[^\s]+'
+    return re.findall(pattern, text)
 
-# ============================ UTILS ============================
+def parse_node_url(url: str) -> dict:
+    """解析节点 URL，提取 IP/端口/协议"""
+    try:
+        if url.startswith('vmess://'):
+            json_str = decode_base64(url[8:])
+            cfg = json.loads(json_str)
+            return {
+                "type": "vmess",
+                "ip": cfg.get("add", ""),
+                "port": int(cfg.get("port", 0)),
+                "ps": cfg.get("ps", "vmess"),
+                "raw": url
+            }
+        elif url.startswith(('vless://', 'trojan://', 'ss://')):
+            rest = url.split('://', 1)[1]
+            if '#' in rest:
+                rest, remark = rest.split('#', 1)
+                remark = urllib.parse.unquote(remark)
+            else:
+                remark = "node"
 
-def log(msg: str):
-    print(msg, flush=True)
+            if '@' in rest:
+                _, addr = rest.split('@', 1)
+            else:
+                addr = rest
 
+            if '?' in addr:
+                addr = addr.split('?', 1)[0]
+            if ':' in addr:
+                ip, port_str = addr.rsplit(':', 1)
+                if ip.startswith('['):
+                    ip = ip[1:].split(']', 1)[0]
+                port = int(port_str.split('/')[0])
+            else:
+                ip = addr
+                port = 443
 
-def fetch(url: str, timeout: int = 30) -> bytes:
+            proto = url.split('://')[0]
+            return {
+                "type": proto,
+                "ip": ip,
+                "port": port,
+                "ps": remark,
+                "raw": url
+            }
+    except Exception:
+        return None
+    return None
+
+# ============ 网络测试 ============
+
+def tcp_test(ip: str, port: int) -> int:
+    """TCP 连接测试，返回延迟(ms)，失败返回 99999"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(LATENCY_TIMEOUT)
+        start = datetime.now()
+        sock.connect((ip, port))
+        latency = int((datetime.now() - start).total_seconds() * 1000)
+        sock.close()
+        return latency
+    except Exception:
+        return 99999
+
+def tls_test(ip: str, port: int) -> int:
+    """TLS 握手测试，返回延迟(ms)，失败返回 99999"""
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        sock = socket.create_connection((ip, port), timeout=3)
+        start = datetime.now()
+        tls_sock = ctx.wrap_socket(sock, server_hostname=ip)
+        latency = int((datetime.now() - start).total_seconds() * 1000)
+        tls_sock.close()
+        return latency
+    except Exception:
+        return 99999
+
+def real_connect_test(node: dict) -> dict:
+    """真连接测试：TCP + TLS"""
+    ip, port = node["ip"], node["port"]
+
+    # TCP 测试
+    tcp_lat = tcp_test(ip, port)
+    if tcp_lat == 99999 or tcp_lat > MAX_LATENCY_MS:
+        return None
+
+    node["tcp_latency"] = tcp_lat
+
+    # TLS 测试（针对 TLS 端口）
+    tls_ports = [443, 8443, 2053, 2083, 2087, 2096]
+    if port in tls_ports:
+        tls_lat = tls_test(ip, port)
+        node["tls_latency"] = tls_lat
+        if tls_lat == 99999:
+            node["score"] = tcp_lat + 1000  # TLS 失败扣分
+        else:
+            node["score"] = tcp_lat + tls_lat
+    else:
+        node["tls_latency"] = 0
+        node["score"] = tcp_lat
+
+    return node
+
+def get_country(ip: str, geo_reader) -> str:
+    """查询 IP 归属国家"""
+    try:
+        rec = geo_reader.get(ip)
+        return rec.get("country", {}).get("iso_code", "") or rec.get("registered_country", {}).get("iso_code", "")
+    except Exception:
+        return ""
+
+# ============ 主流程 ============
+
+def fetch_source(source: dict) -> list:
+    """抓取单个源"""
+    url = source["url"].format(date=datetime.now().strftime("%Y%m%d"))
     try:
         req = urllib.request.Request(
             url,
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept": "text/plain,*/*"
             },
+            timeout=15
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read()
+        with urllib.request.urlopen(req) as resp:
+            data = resp.read().decode('utf-8', errors='ignore')
+            nodes = extract_nodes(data)
+            print(f"[FETCH] {url} -> {len(nodes)} nodes")
+            return nodes
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"[FETCH MISS] {url}: 404")
+        else:
+            print(f"[FETCH ERR] {url}: HTTP {e.code}")
+        return []
     except Exception as e:
-        log(f"[FETCH ERR] {url}: {e}")
-        return b""
-
-
-def decode_sub(data: bytes) -> str:
-    text = data.decode("utf-8", errors="ignore")
-    if len(text) > 40 and not text.strip().startswith(("{", "[", "proxies:")):
-        try:
-            decoded = base64.b64decode(text).decode("utf-8", errors="ignore")
-            if "vmess://" in decoded or "vless://" in decoded or "trojan://" in decoded or "ss://" in decoded:
-                return decoded
-        except Exception:
-            pass
-        try:
-            decoded = base64.urlsafe_b64decode(text).decode("utf-8", errors="ignore")
-            if "vmess://" in decoded or "vless://" in decoded:
-                return decoded
-        except Exception:
-            pass
-    return text
-
-
-# ============================ PARSE ============================
-
-def extract_uris(text: str) -> list:
-    nodes = []
-    patterns = [
-        (r"vmess://([A-Za-z0-9+/=]+)", "vmess"),
-        (r"(vless://[^\s]+)", "vless"),
-        (r"(trojan://[^\s]+)", "trojan"),
-        (r"(ss://[^\s]+)", "ss"),
-        (r"(ssr://[^\s]+)", "ssr"),
-    ]
-    for pat, proto in patterns:
-        for m in re.finditer(pat, text):
-            nodes.append({"raw": m.group(0), "proto": proto})
-    return nodes
-
-
-def parse_clash_yaml(text: str) -> list:
-    nodes = []
-    try:
-        data = yaml.safe_load(text)
-        proxies = data.get("proxies", []) if isinstance(data, dict) else []
-    except Exception as e:
-        log(f"[YAML ERR] {e}")
-        return nodes
-
-    for p in proxies:
-        try:
-            t = p.get("type", "").lower()
-            name = p.get("name", "unnamed")
-            server = p.get("server", "")
-            port = int(p.get("port", 0))
-            if not server or not port:
-                continue
-
-            if t == "vmess":
-                cfg = {
-                    "v": "2", "ps": name, "add": server, "port": str(port),
-                    "id": p.get("uuid", ""), "aid": str(p.get("alterId", 0)),
-                    "scy": p.get("cipher", "auto"), "net": p.get("network", "tcp"),
-                    "type": p.get("type", "none"),
-                    "host": p.get("ws-opts", {}).get("headers", {}).get("Host", p.get("servername", "")),
-                    "path": p.get("ws-opts", {}).get("path", "/"),
-                    "tls": "tls" if p.get("tls", False) else "",
-                    "sni": p.get("servername", ""),
-                }
-                b64 = base64.b64encode(json.dumps(cfg, ensure_ascii=False).encode()).decode()
-                nodes.append({"raw": f"vmess://{b64}", "proto": "vmess"})
-            elif t == "vless":
-                qs = {
-                    "encryption": p.get("flow", "none") or "none",
-                    "security": "tls" if p.get("tls", False) else "none",
-                    "sni": p.get("servername", ""), "type": p.get("network", "tcp"),
-                    "host": p.get("ws-opts", {}).get("headers", {}).get("Host", ""),
-                    "path": p.get("ws-opts", {}).get("path", "/"), "fp": "chrome",
-                }
-                qs_str = urllib.parse.urlencode({k: v for k, v in qs.items() if v})
-                raw = f"vless://{p.get('uuid', '')}@{server}:{port}?{qs_str}#{urllib.parse.quote(name)}"
-                nodes.append({"raw": raw, "proto": "vless"})
-            elif t == "trojan":
-                qs = {
-                    "security": "tls" if p.get("tls", False) else "none",
-                    "sni": p.get("sni", ""), "type": p.get("network", "tcp"),
-                    "host": p.get("ws-opts", {}).get("headers", {}).get("Host", ""),
-                    "path": p.get("ws-opts", {}).get("path", "/"),
-                }
-                qs_str = urllib.parse.urlencode({k: v for k, v in qs.items() if v})
-                raw = f"trojan://{p.get('password', '')}@{server}:{port}?{qs_str}#{urllib.parse.quote(name)}"
-                nodes.append({"raw": raw, "proto": "trojan"})
-            elif t == "ss":
-                userinfo = base64.b64encode(f"{p.get('cipher', 'aes-256-gcm')}:{p.get('password', '')}".encode()).decode()
-                raw = f"ss://{userinfo}@{server}:{port}#{urllib.parse.quote(name)}"
-                nodes.append({"raw": raw, "proto": "ss"})
-        except Exception:
-            continue
-    return nodes
-
-
-# ============================ EXTRACT META ============================
-
-def extract_node_meta(raw: str, proto: str) -> dict | None:
-    """Extract ip, port, sni from a node URI."""
-    try:
-        if proto == "vmess":
-            b64 = raw.replace("vmess://", "").strip()
-            b64 += "=" * (-len(b64) % 4)
-            cfg = json.loads(base64.b64decode(b64).decode("utf-8", errors="ignore"))
-            return {
-                "ip": cfg.get("add"),
-                "port": int(cfg.get("port", 0)),
-                "sni": cfg.get("sni", "") or cfg.get("host", ""),
-            }
-        elif proto in ("vless", "trojan"):
-            url = urllib.parse.urlparse(raw)
-            qs = urllib.parse.parse_qs(url.query)
-            sni = qs.get("sni", [""])[0] or qs.get("host", [""])[0] or url.hostname or ""
-            return {"ip": url.hostname, "port": url.port or 0, "sni": sni}
-        elif proto in ("ss", "ssr"):
-            url = urllib.parse.urlparse(raw)
-            return {"ip": url.hostname, "port": url.port or 0, "sni": ""}
-    except Exception:
-        return None
-    return None
-
-
-# ============================ GEO IP ============================
-
-GEO_READER = None
-
-def get_ip_info(ip: str) -> dict | None:
-    if ip in GEO_CACHE:
-        return GEO_CACHE[ip]
-    global GEO_READER
-    if GEO_READER is None:
-        db_path = "GeoLite2-Country.mmdb"
-        if not Path(db_path).exists():
-            db_path = "/mnt/agents/output/GeoLite2-Country.mmdb"
-        try:
-            GEO_READER = maxminddb.open_database(db_path)
-        except Exception as e:
-            log(f"[GEO DB ERR] {e}")
-            GEO_CACHE[ip] = None
-            return None
-    try:
-        rec = GEO_READER.get(ip)
-        if rec and "country" in rec and "iso_code" in rec["country"]:
-            cc = rec["country"]["iso_code"]
-            data = {"countryCode": cc, "status": "success", "query": ip, "as": ""}
-            GEO_CACHE[ip] = data
-            return data
-    except Exception:
-        pass
-    GEO_CACHE[ip] = None
-    return None
-
-
-# ============================ TCP PING ============================
-
-def test_real_connection(ip: str, port: int, sni: str) -> tuple[bool, float]:
-    """
-    Real connection test:
-    - Non-TLS ports: TCP connect only
-    - TLS ports: TCP + TLS handshake with SNI
-    Returns (ok, latency_ms).
-    """
-    try:
-        t0 = time.time()
-        sock = socket.create_connection((ip, port), timeout=5)
-        
-        if port in TLS_PORTS:
-            hostname = sni if sni else ip
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-            sock = context.wrap_socket(sock, server_hostname=hostname)
-        
-        sock.close()
-        lat = (time.time() - t0) * 1000
-        return True, lat
-    except Exception:
-        try:
-            sock.close()
-        except Exception:
-            pass
-        return False, 99999.0
-
-
-
-# ============================ REAL HTTP 204 TEST ============================
-
-TLS_PORTS = {443, 8443, 2053, 2083, 2087, 2096}
-
-# ============================ V2RAYSE ============================
-
-def get_v2rayse_urls(days_back: int = 3) -> list:
-    urls = []
-    today = datetime.utcnow() + timedelta(hours=8)
-    for i in range(days_back):
-        date_str = (today - timedelta(days=i)).strftime("%Y%m%d")
-        candidates = [
-            f"https://v2rayse.com/fs/public/{date_str}/free-node-share-0800.txt",
-            f"https://v2rayse.com/fs/public/{date_str}/free-node-share-2000.txt",
-        ]
-        day_ok = False
-        for url in candidates:
-            data = fetch(url, timeout=10)
-            if data and len(data) > 100:
-                urls.append(url)
-                day_ok = True
-                log(f"[V2RAYSE] OK {url}")
-            else:
-                log(f"[V2RAYSE] MISS {url}")
-        if day_ok:
-            break
-    return urls
-
-
-# ============================ MAIN ============================
+        print(f"[FETCH ERR] {url}: {str(e)[:50]}")
+        return []
 
 def main():
-    all_nodes: list[dict] = []
+    print("=" * 50)
+    print(f"Starting aggregation at {datetime.now()}")
+    print("=" * 50)
 
-    # 0. Fetch v2rayse
-    v2rayse_urls = get_v2rayse_urls(days_back=3)
-    for url in v2rayse_urls:
-        log(f"[FETCH] {url}")
-        data = fetch(url)
-        if not data:
-            continue
-        text = decode_sub(data)
-        if text.strip().startswith(("proxies:", "---", "port:")) or "proxies:" in text[:500]:
-            nodes = parse_clash_yaml(text)
-        else:
-            nodes = extract_uris(text)
-        log(f"  -> {len(nodes)} nodes")
-        all_nodes.extend(nodes)
+    # 1. 加载 GeoIP
+    geo_reader = maxminddb.open_database("GeoLite2-Country.mmdb")
 
-    # 1. Fetch standard sources (Pawdroid / proxypool / mfuu / glasspanelfree / liyan1236)
-    for url in SOURCES:
-        log(f"[FETCH] {url}")
-        data = fetch(url)
-        if not data:
-            continue
-        text = decode_sub(data)
-        if text.strip().startswith(("proxies:", "---", "port:")) or "proxies:" in text[:500]:
-            nodes = parse_clash_yaml(text)
-        else:
-            nodes = extract_uris(text)
-        log(f"  -> {len(nodes)} nodes")
-        all_nodes.extend(nodes)
+    # 2. 并发抓取所有源
+    all_urls = []
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = {ex.submit(fetch_source, s): s for s in SOURCES}
+        for fut in as_completed(futures):
+            all_urls.extend(fut.result())
 
-    # 2. Fetch SS pools
-    for url in SS_POOLS:
-        log(f"[FETCH SS] {url}")
-        data = fetch(url)
-        if data:
-            text = decode_sub(data)
-            nodes = extract_uris(text)
-            log(f"  -> {len(nodes)} nodes")
-            all_nodes.extend(nodes)
+    print(f"[TOTAL RAW URLs] {len(all_urls)}")
 
-    log(f"[TOTAL RAW] {len(all_nodes)} nodes")
+    # 3. 解析节点
+    nodes = []
+    for url in all_urls:
+        n = parse_node_url(url)
+        if n and n["ip"] and n["port"]:
+            nodes.append(n)
 
-    # 3. Enrich: parse IP/port/SNI
-    enriched = []
-    for n in all_nodes:
-        meta = extract_node_meta(n["raw"], n["proto"])
-        if meta and meta["ip"] and meta["port"]:
-            enriched.append({
-                "raw": n["raw"],
-                "proto": n["proto"],
-                "ip": str(meta["ip"]),
-                "port": int(meta["port"]),
-                "sni": str(meta.get("sni", "")),
-            })
+    print(f"[PARSED] {len(nodes)} nodes with IP/port")
 
-    log(f"[ENRICHED] {len(enriched)} nodes with IP/port")
-
-    # 4. DEDUPLICATE by IP:port (keep first)
-    seen = {}
-    deduped = []
-    for n in enriched:
-        key = (n["ip"], n["port"])
+    # 4. IP:Port 去重
+    seen = set()
+    unique_nodes = []
+    for n in nodes:
+        key = f"{n['ip']}:{n['port']}"
         if key not in seen:
-            seen[key] = True
-            deduped.append(n)
-    log(f"[DEDUP IP:PORT] {len(deduped)} unique endpoints (dropped {len(enriched) - len(deduped)} dupes)")
+            seen.add(key)
+            unique_nodes.append(n)
 
-    # 5. Real connection test (TCP + TLS handshake for TLS ports)
-    log("[CONN] Testing real connections (TCP + TLS handshake)...")
-    conn_alive = []
-    with ThreadPoolExecutor(max_workers=40) as ex:
-        futs = {ex.submit(test_real_connection, n["ip"], n["port"], n["sni"]): n for n in deduped}
-        for fut in as_completed(futs):
-            n = futs[fut]
-            ok, lat = fut.result()
-            if ok and 0 < lat <= MAX_LATENCY_MS:
-                n["conn_ms"] = round(lat, 1)
-                conn_alive.append(n)
-                log(f"  OK {n['ip']}:{n['port']} {lat:.0f}ms")
-            else:
-                log(f"  DEAD {n['ip']}:{n['port']} {lat:.0f}ms")
-    log(f"[CONN PASS] {len(conn_alive)} nodes")
+    print(f"[DEDUP] {len(unique_nodes)} unique endpoints (dropped {len(nodes)-len(unique_nodes)} dupes)")
 
-    # 6. Geo filter (only on connection-alive nodes)
-    log("[GEO] Filtering target countries (HK/TW/JP/SG/MY/KR)...")
+    # 5. 并发 TCP+TLS 测试（并发数 100）
+    alive_nodes = []
+    print(f"[TEST] Testing {len(unique_nodes)} nodes with {LATENCY_TIMEOUT}s timeout...")
+
+    with ThreadPoolExecutor(max_workers=100) as ex:
+        futures = {ex.submit(real_connect_test, n): n for n in unique_nodes}
+        for i, fut in enumerate(as_completed(futures)):
+            result = fut.result()
+            if result:
+                alive_nodes.append(result)
+                if i % 50 == 0:
+                    print(f"  Progress: {i}/{len(unique_nodes)}, alive so far: {len(alive_nodes)}")
+
+    # 按 score 排序
+    alive_nodes.sort(key=lambda x: x["score"])
+
+    print(f"[CONN PASS] {len(alive_nodes)} nodes (TCP+TLS tested)")
+
+    # 6. Geo 过滤
     geo_passed = []
-    for n in conn_alive:
-        info = get_ip_info(n["ip"])
-        if info:
-            cc = info.get("countryCode", "")
-            if cc in TARGET_COUNTRIES:
-                n["country"] = cc
-                n["as_info"] = info.get("as", "")
-                geo_passed.append(n)
-    log(f"[GEO PASS] {len(geo_passed)} nodes")
+    other_nodes = []
 
-    # 7. Final dedup by raw URI
-    seen_raw = set()
-    final = []
-    for n in geo_passed:
-        if n["raw"] not in seen_raw:
-            seen_raw.add(n["raw"])
-            final.append(n)
-    log(f"[FINAL] {len(final)} unique nodes")
+    for n in alive_nodes:
+        country = get_country(n["ip"], geo_reader)
+        n["country"] = country
+        if country in GEO_COUNTRIES:
+            geo_passed.append(n)
+        else:
+            other_nodes.append(n)
 
-    # 8. Write outputs
-    plain = "\n".join(n["raw"] for n in final)
-    (OUT_DIR / "nodes.txt").write_text(plain, encoding="utf-8")
+    print(f"[GEO] Target countries ({','.join(GEO_COUNTRIES)}): {len(geo_passed)} nodes")
 
-    b64 = base64.b64encode(plain.encode()).decode()
-    (OUT_DIR / "nodes_base64.txt").write_text(b64, encoding="utf-8")
-    (OUT_DIR / "sub").write_text(b64, encoding="utf-8")
+    # 亚洲节点不足时，补充欧美低延迟节点
+    MIN_NODES = 50
+    if len(geo_passed) < MIN_NODES:
+        supplement = [n for n in other_nodes if n["tcp_latency"] < 500][:MIN_NODES - len(geo_passed)]
+        geo_passed.extend(supplement)
+        print(f"[GEO] Supplemented {len(supplement)} low-latency non-Asia nodes")
 
+    geo_reader.close()
+
+    # 7. 分级输出
+    tier_a = [n for n in geo_passed if n["tcp_latency"] < 100]
+    tier_b = [n for n in geo_passed if 100 <= n["tcp_latency"] < 300]
+    tier_c = [n for n in geo_passed if 300 <= n["tcp_latency"] <= MAX_LATENCY_MS]
+
+    final_nodes = tier_a + tier_b + tier_c
+
+    # 限制总数，适配 Hiddify
+    MAX_OUTPUT = 150
+    final_nodes = final_nodes[:MAX_OUTPUT]
+
+    print(f"[FINAL] {len(final_nodes)} nodes")
+    print(f"  Tier A (<100ms): {len(tier_a)}")
+    print(f"  Tier B (100-300ms): {len(tier_b)}")
+    print(f"  Tier C (300-2000ms): {len(tier_c)}")
+
+    # 统计国家分布
+    country_dist = {}
+    for n in final_nodes:
+        c = n.get("country", "??")
+        country_dist[c] = country_dist.get(c, 0) + 1
+    print(f"  Countries: {json.dumps(country_dist, ensure_ascii=False)}")
+
+    # 8. 输出文件
+    os.makedirs("output", exist_ok=True)
+
+    # 8.1 原始节点列表（按质量排序）
+    with open("output/nodes.txt", "w", encoding="utf-8") as f:
+        for n in final_nodes:
+            f.write(n["raw"] + "\n")
+
+    # 8.2 Base64 编码订阅
+    raw_text = "\n".join(n["raw"] for n in final_nodes)
+    b64_text = base64.b64encode(raw_text.encode()).decode()
+    with open("output/nodes_base64.txt", "w") as f:
+        f.write(b64_text)
+
+    # 8.3 通用订阅格式
+    with open("output/sub", "w") as f:
+        f.write(b64_text)
+
+    # 8.4 生成报告
     report = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC"),
-        "total_raw": len(all_nodes),
-        "enriched": len(enriched),
-        "deduped_ip_port": len(deduped),
-        "conn_alive": len(conn_alive),
-        "geo_passed": len(geo_passed),
-        "final_unique": len(final),
-        "countries": {},
+        "timestamp": datetime.now().isoformat(),
+        "raw_fetched": len(all_urls),
+        "parsed": len(nodes),
+        "deduped": len(unique_nodes),
+        "alive": len(alive_nodes),
+        "geo_passed": len([n for n in geo_passed if n.get("country") in GEO_COUNTRIES]),
+        "final": len(final_nodes),
+        "tier_distribution": {
+            "A": len(tier_a),
+            "B": len(tier_b),
+            "C": len(tier_c)
+        },
+        "countries": country_dist,
+        "sources": [s["url"] for s in SOURCES]
     }
-    for n in final:
-        cc = n.get("country", "??")
-        report["countries"][cc] = report["countries"].get(cc, 0) + 1
+    with open("output/report.json", "w") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
 
-    (OUT_DIR / "report.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    log("\n========== SUMMARY ==========")
-    log(f"Raw fetched       : {len(all_nodes)}")
-    log(f"Enriched          : {len(enriched)}")
-    log(f"Deduped (IP:port) : {len(deduped)}")
-    log(f"Conn alive        : {len(conn_alive)}")
-    log(f"Geo passed        : {len(geo_passed)}")
-    log(f"Final unique      : {len(final)}")
-    log("Countries         : " + json.dumps(report["countries"], ensure_ascii=False))
-    log("Outputs           : output/nodes.txt | output/nodes_base64.txt | output/sub")
-    log("==============================")
-
-    if len(final) == 0:
-        log("[WARN] Zero nodes survived filtering.")
-        sys.exit(0)
-
+    print("=" * 50)
+    print("Outputs: output/nodes.txt | output/nodes_base64.txt | output/sub | output/report.json")
+    print("=" * 50)
 
 if __name__ == "__main__":
     main()
