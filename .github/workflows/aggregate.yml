@@ -27,7 +27,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyyaml requests
+          pip install pyyaml requests maxminddb
+
+      - name: Download GeoLite2 Country DB
+        run: |
+          wget -qO GeoLite2-Country.mmdb             "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb"             || wget -qO GeoLite2-Country.mmdb             "https://github.com/alecthw/mmdb_china_ip_list/raw/release/Country.mmdb"
+          ls -lh GeoLite2-Country.mmdb
 
       - name: Run aggregator script
         env:
