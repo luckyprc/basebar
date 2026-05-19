@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Node Aggregator: Multi-source -> IP:port dedup -> HTTP 204 real test -> Geo filter -> Base64 + Plain
-Sources: Pawdroid, ripaojiedian, mfuu, ermaozi, snakem982, peasoft, mahdibland, v2rayse(0800/2000)
+Node Aggregator: Multi-source -> IP:port dedup -> Real connection test -> Geo filter -> Base64 + Plain
+Sources: v2rayse(0800/2000), Pawdroid, proxypool.link, mfuu/v2ray, glasspanelfree, liyan1236
 """
 
 import base64
@@ -24,13 +24,18 @@ import maxminddb
 
 # ============================ CONFIG ============================
 SOURCES = [
+    # Pawdroid (GitHub)
     "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
-    "https://raw.githubusercontent.com/ripaojiedian/freenode/main/sub",
+    # proxypool.link (snakem982 v2ray format)
+    "https://raw.githubusercontent.com/snakem982/proxypool/main/source/v2ray.txt",
+    # mfuu/v2ray
     "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray",
-    "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
-    "https://raw.githubusercontent.com/snakem982/proxypool/main/source/clash-meta.yaml",
-    "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list.txt",
-    "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/Eternity",
+    # glasspanelfree (Edge subscription)
+    "https://glasspanelfree.betsyangel.ndjp.net/sub",
+    # liyan1236 (Token subscription)
+    "https://liyan1236.ccwu.cc/sub?token=1e33160d4f679f921a2fc44c83b94c33",
+    # v2cross: no stable public subscription URL found; add manually if known
+    # "https://...",
     # v2rayse handled dynamically in main()
 ]
 
@@ -303,7 +308,7 @@ def main():
         log(f"  -> {len(nodes)} nodes")
         all_nodes.extend(nodes)
 
-    # 1. Fetch standard sources
+    # 1. Fetch standard sources (Pawdroid / proxypool / mfuu / glasspanelfree / liyan1236)
     for url in SOURCES:
         log(f"[FETCH] {url}")
         data = fetch(url)
