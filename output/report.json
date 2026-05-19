@@ -1,11 +1,17 @@
 {
-  "timestamp": "2026-05-19 04:25:47 UTC",
+  "timestamp": "2026-05-19 04:44:44 UTC",
   "total_raw": 1100,
   "enriched": 868,
   "deduped_ip_port": 545,
-  "tcp_alive": 466,
-  "http_alive": 7,
-  "geo_passed": 0,
-  "final_unique": 0,
-  "countries": {}
+  "conn_alive": 425,
+  "geo_passed": 117,
+  "final_unique": 117,
+  "countries": {
+    "JP": 18,
+    "SG": 29,
+    "HK": 27,
+    "KR": 39,
+    "MY": 2,
+    "TW": 2
+  }
 }
