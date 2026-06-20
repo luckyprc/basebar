@@ -1,24 +1,24 @@
 {
-  "timestamp": "2026-06-20T05:01:44.271348",
-  "raw_fetched": 283,
-  "parsed": 281,
-  "deduped": 201,
-  "alive": 136,
-  "geo_passed": 82,
-  "final": 80,
+  "timestamp": "2026-06-20T11:06:06.249114",
+  "raw_fetched": 260,
+  "parsed": 258,
+  "deduped": 169,
+  "alive": 114,
+  "geo_passed": 58,
+  "final": 58,
   "tier_distribution": {
-    "A": 50,
-    "B": 19,
-    "C": 12
+    "A": 29,
+    "B": 27,
+    "C": 2
   },
   "countries": {
-    "US": 16,
-    "HK": 20,
-    "DE": 8,
-    "NL": 14,
-    "GB": 3,
-    "JP": 10,
-    "KR": 8,
+    "US": 23,
+    "DE": 10,
+    "GB": 1,
+    "NL": 12,
+    "JP": 2,
+    "HK": 7,
+    "KR": 2,
     "SG": 1
   },
   "sources": [
