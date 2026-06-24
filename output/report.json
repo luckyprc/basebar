@@ -1,15 +1,15 @@
 {
-  "timestamp": "2026-06-24T08:17:53.473306",
+  "timestamp": "2026-06-24T11:35:50.108265",
   "raw_fetched": 414,
   "parsed": 412,
-  "deduped": 301,
-  "alive": 230,
-  "geo_passed": 157,
+  "deduped": 307,
+  "alive": 235,
+  "geo_passed": 159,
   "final": 80,
   "tier_distribution": {
-    "A": 130,
-    "B": 14,
-    "C": 13
+    "A": 129,
+    "B": 18,
+    "C": 12
   },
   "countries": {
     "US": 78,
