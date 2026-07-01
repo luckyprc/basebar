@@ -28,6 +28,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          touch sub.txt
           git add sub.txt
           if git diff --cached --quiet; then
             echo "No changes to commit"
