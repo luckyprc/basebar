@@ -2,23 +2,23 @@
 import os
 import re
 import sys
-import urllib.request
-import urllib.error
+import requests
 from datetime import datetime, timezone
 
 CHANNEL = "Outline_Vpn"
 KV_FILE = "sub.txt"
 
+# 更宽松的正则，匹配各种节点格式
 NODE_PATTERNS = [
     r'vmess://[A-Za-z0-9+/=_\-]+',
-    r'vless://[A-Za-z0-9+/=_\-@:]+',
-    r'ss://[A-Za-z0-9+/=_\-@:]+',
-    r'ssr://[A-Za-z0-9+/=_\-@:]+',
-    r'trojan://[A-Za-z0-9+/=_\-@:]+',
-    r'hysteria2?://[A-Za-z0-9+/=_\-@:]+',
-    r'hy2://[A-Za-z0-9+/=_\-@:]+',
-    r'tuic://[A-Za-z0-9+/=_\-@:]+',
-    r'wg://[A-Za-z0-9+/=_\-@:]+',
+    r'vless://[A-Za-z0-9+/=_\-@:.\[\]]+',
+    r'ss://[A-Za-z0-9+/=_\-@:.\[\]#]+',
+    r'ssr://[A-Za-z0-9+/=_\-@:.\[\]]+',
+    r'trojan://[A-Za-z0-9+/=_\-@:.\[\]]+',
+    r'hysteria2?://[A-Za-z0-9+/=_\-@:.\[\]]+',
+    r'hy2://[A-Za-z0-9+/=_\-@:.\[\]]+',
+    r'tuic://[A-Za-z0-9+/=_\-@:.\[\]]+',
+    r'wg://[A-Za-z0-9+/=_\-@:.\[\]]+',
 ]
 
 def log(msg):
@@ -37,28 +37,24 @@ def extract_nodes(text):
         nodes.extend(re.findall(pattern, text))
     return list(dict.fromkeys(nodes))
 
-def fetch_url(url):
-    req = urllib.request.Request(url, headers={
+def fetch_telegram():
+    url = f"https://t.me/s/{CHANNEL}"
+    headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
         "Referer": "https://t.me/",
         "Cache-Control": "no-cache",
-    })
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return resp.read().decode('utf-8')
-
-def fetch_telegram():
-    url = f"https://t.me/s/{CHANNEL}"
-    log(f"Fetching: {url}")
+    }
     
-    html = fetch_url(url)
-    log(f"HTML length: {len(html)}")
+    r = requests.get(url, headers=headers, timeout=15)
+    log(f"t.me/s/ status: {r.status_code}, length: {len(r.text)}")
     
-    if "tgme_channel_history" not in html and "tgme_widget_message" not in html:
+    if "tgme_channel_history" not in r.text and "tgme_widget_message" not in r.text:
         log("t.me/s/ returned contact/restricted page")
         return []
     
+    html = r.text
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     log(f"Today (UTC): {today}")
     
@@ -74,9 +70,14 @@ def fetch_telegram():
     
     log(f"Dates: {len(dates)}, Texts: {len(texts)}")
     
+    # 调试：打印当天消息的前3条内容预览
     count = min(len(dates), len(texts))
-    all_nodes = []
+    for i in range(count):
+        if dates[i] == today:
+            preview = texts[i][:200].replace('\n', ' ')
+            log(f"Msg {i} ({dates[i]}) preview: {preview}")
     
+    all_nodes = []
     for i in range(count):
         if dates[i] == today:
             nodes = extract_nodes(texts[i])
@@ -92,7 +93,9 @@ def main():
     nodes = fetch_telegram()
     
     if not nodes:
-        log("No nodes found for today")
+        log("No nodes found for today, creating empty file")
+        with open(KV_FILE, "w", encoding="utf-8") as f:
+            f.write("")
         sys.exit(0)
     
     content = '\n'.join(nodes)
